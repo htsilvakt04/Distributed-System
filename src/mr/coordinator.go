@@ -12,9 +12,8 @@ import "net/http"
 import "context"
 
 type Coordinator struct {
-	Files   []string
-	NReduce int
-
+	Files              []string
+	NReduce            int
 	TaskLock           sync.Mutex
 	TaskCondVar        sync.Cond
 	IdleMapTasks       map[string]*MapTask
@@ -24,16 +23,10 @@ type Coordinator struct {
 	IdleReduceTasks       map[int]*ReduceTask
 	ProcessingReduceTasks map[int]*ReduceTask
 	FinishedReduceTasks   map[int]*ReduceTask
-
-	ctx    context.Context
-	cancel context.CancelFunc
+	ctx                   context.Context
+	cancel                context.CancelFunc
 }
 
-// Your code here -- RPC handlers for the worker to call.
-
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
 func (c *Coordinator) NumMapTask() int {
 	return len(c.Files)
 }
@@ -49,6 +42,7 @@ func (c *Coordinator) NotifyTaskSuccess(args *NotifyTaskSuccessArgs, reply *Noti
 	log.Printf("Worker %s notified the completion of task of type %s", args.Address, args.TaskType)
 
 	if args.TaskType == MapTaskType {
+		log.Printf("map task %s completed by worker %s", args.InputFileName, args.Address)
 		moveProcessingTaskToFinish[string, *MapTask](c, args.InputFileName, c.ProcessingMapTasks, c.FinishedMapTasks)
 	}
 	if args.TaskType == ReduceTaskType {
@@ -70,23 +64,24 @@ func moveProcessingTaskToFinish[K comparable, V Task](c *Coordinator, taskId K, 
 }
 
 func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
-	log.Printf("Process %s is requesting a task", args.Address)
 	mapTask, err := c.GetMapTask(args, reply)
 	if err != nil {
-		log.Printf("Error getting map task for %s: %v", args.Address, err)
+		log.Printf("Error getting map task for %s: %v", args.PId, err)
 		reply.Error = err.Error()
 		return nil
 	}
 	if mapTask != nil {
+		log.Printf("Assigned map task with input name: %s and mapTaskNumber: %d \n", mapTask.InputFileName, mapTask.MapTaskNumber)
 		return nil
 	}
 	// If no map task is available, try to get a reduce task
 	reduceTask, err := c.GetReduceTask(args, reply)
 	if err != nil {
-		log.Printf("Error getting reduce task for %s: %v", args.Address, err)
+		log.Printf("Error getting reduce task for %s: %v", args.PId, err)
 		reply.Error = err.Error()
 		return nil
 	}
+
 	if reduceTask != nil {
 		return nil
 	}
@@ -159,7 +154,7 @@ func (c *Coordinator) Init(files []string, nReduce int) {
 }
 
 func (c *Coordinator) startExpiredTaskCleaner() {
-	ticker := time.NewTicker(1 * time.Second)
+	ticker := time.NewTicker(2 * time.Second)
 	go func() {
 		defer ticker.Stop() // Always stop ticker when done to avoid leaks
 
@@ -169,18 +164,19 @@ func (c *Coordinator) startExpiredTaskCleaner() {
 				return // Exit the goroutine cleanly
 			case <-ticker.C:
 				c.TaskLock.Lock()
-				moveExpiredTasksFromProcessingToIdle(c, c.ProcessingMapTasks, c.IdleMapTasks)
-				moveExpiredTasksFromProcessingToIdle(c, c.ProcessingReduceTasks, c.IdleReduceTasks)
+				moveExpiredTasksFromProcessingToIdle(c, c.ProcessingMapTasks, c.IdleMapTasks, c.FinishedMapTasks)
+				moveExpiredTasksFromProcessingToIdle(c, c.ProcessingReduceTasks, c.IdleReduceTasks, c.FinishedReduceTasks)
 				c.TaskLock.Unlock()
 			}
 		}
 	}()
 }
 
-func moveExpiredTasksFromProcessingToIdle[K comparable, V Task](c *Coordinator, from map[K]V, to map[K]V) {
+func moveExpiredTasksFromProcessingToIdle[K comparable, V Task](c *Coordinator, from map[K]V, to map[K]V, finished map[K]V) {
 	shouldWakeUp := false
 	for id, task := range from {
 		if task.IsExpired() {
+			log.Printf("Task %v is expired, moving it back to idle tasks", id)
 			to[id] = task
 			delete(from, id)
 			shouldWakeUp = true
@@ -198,6 +194,7 @@ func moveExpiredTasksFromProcessingToIdle[K comparable, V Task](c *Coordinator, 
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
 	registerLogFile("coordinator.log")
+	log.Printf("Coordinator starting with %d files and %d reduce tasks", len(files), nReduce)
 	c.Init(files, nReduce)
 	c.startExpiredTaskCleaner()
 	c.server()
