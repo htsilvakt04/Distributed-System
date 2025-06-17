@@ -6,13 +6,22 @@ package mr
 // remember to capitalize all names.
 //
 
-import "os"
+import (
+	"os"
+)
 import "strconv"
 
-//
-// example to show how to declare the arguments
-// and reply for an RPC.
-//
+type GetTaskReply struct {
+	TaskType   TaskType    // enum: map or reduce
+	MapTask    *MapTask    // non-nil if TaskType == MapTaskType
+	ReduceTask *ReduceTask // non-nil if TaskType == ReduceTaskType
+	Done       bool        // true if there are no more tasks to assign
+	Error      string
+}
+
+type GetTaskArgs struct {
+	Address string
+}
 
 type ExampleArgs struct {
 	X int
@@ -23,7 +32,6 @@ type ExampleReply struct {
 }
 
 // Add your RPC definitions here.
-
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the coordinator.
