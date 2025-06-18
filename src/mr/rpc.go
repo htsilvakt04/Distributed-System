@@ -27,6 +27,7 @@ type NotifyTaskSuccessArgs struct {
 	TaskType         TaskType
 	InputFileName    string // valid only if TaskType == MapTaskType
 	ReduceTaskNumber int    // alid only if TaskType == ReduceTaskType
+	Address          string
 }
 type NotifyTaskSuccessReply struct{}
 

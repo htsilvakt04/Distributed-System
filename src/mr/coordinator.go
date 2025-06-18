@@ -25,13 +25,13 @@ type Coordinator struct {
 
 	TaskLock           sync.Mutex
 	TaskCondVar        sync.Cond
-	IdleMapTasks       []*MapTask
-	ProcessingMapTasks []*MapTask
-	FinishedMapTasks   []*MapTask
+	IdleMapTasks       map[string]*MapTask
+	ProcessingMapTasks map[string]*MapTask
+	FinishedMapTasks   map[string]*MapTask
 
-	IdleReduceTasks       []*ReduceTask
-	ProcessingReduceTasks []*ReduceTask
-	FinishedReduceTasks   []*ReduceTask
+	IdleReduceTasks       map[int]*ReduceTask
+	ProcessingReduceTasks map[int]*ReduceTask
+	FinishedReduceTasks   map[int]*ReduceTask
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -45,32 +45,40 @@ type Coordinator struct {
 func (c *Coordinator) NumMapTask() int {
 	return len(c.Files)
 }
+
 func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 	reply.Y = args.X + 1
 	return nil
 }
+
 func (c *Coordinator) NotifyTaskSuccess(args *NotifyTaskSuccessArgs, reply *NotifyTaskSuccessReply) error {
 	c.TaskLock.Lock()
 	defer c.TaskLock.Unlock()
+	DPrintf("Worker %s notified the completion of task of type %s", args.Address, args.TaskType)
+
 	if args.TaskType == MapTaskType {
-		for _, task := range c.ProcessingMapTasks {
-			if args.InputFileName == task.InputFileName {
-				task.ProcessedTime = 0 // reset processed time
-				c.FinishedMapTasks = append(c.FinishedMapTasks, task)
-				// remove from processing tasks
-				for i, t := range c.ProcessingMapTasks {
-					if t == task {
-						c.ProcessingMapTasks = append(c.ProcessingMapTasks[:i], c.ProcessingMapTasks[i+1:]...)
-						break
-					}
-				}
-				DPrintf("Worker %s completed map task %d", args.Address, task.MapTaskNumber)
-				c.TaskCondVar.Broadcast() // notify waiting workers
-				return nil
-			}
+		moveProcessingTaskToFinish[string, *MapTask](c, args.InputFileName, c.ProcessingMapTasks, c.FinishedMapTasks)
+	}
+	if args.TaskType == ReduceTaskType {
+		moveProcessingTaskToFinish[int, *ReduceTask](c, args.ReduceTaskNumber, c.ProcessingReduceTasks, c.FinishedReduceTasks)
+	}
+	return nil
+}
+
+func moveProcessingTaskToFinish[K comparable, V Task](c *Coordinator, taskId K, processingMap map[K]V, finishMap map[K]V) {
+	for id, task := range processingMap {
+		if taskId == id {
+			// reset processed time
+			task.resetProcessedTime()
+			// move to finished tasks
+			finishMap[id] = task
+			// remove from processing tasks
+			delete(processingMap, id)
+			c.TaskCondVar.Broadcast() // notify waiting workers
 		}
 	}
 }
+
 func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 	DPrintf("Process %s is requesting a task", args.Address)
 	map_task, err := c.GetMapTask(args, reply)
@@ -136,7 +144,7 @@ func (c *Coordinator) Init(files []string, nReduce int) {
 			MapTaskNumber: i,
 			ProcessedTime: 0,
 		}
-		c.IdleMapTasks = append(c.IdleMapTasks, &task)
+		c.IdleMapTasks[file] = &task
 	}
 	// Initialize idle reduce tasks
 	for i := range nReduce {
@@ -145,7 +153,7 @@ func (c *Coordinator) Init(files []string, nReduce int) {
 			TotalNumberOfMapTasks: len(files),
 			ProcessedTime:         0,
 		}
-		c.IdleReduceTasks = append(c.IdleReduceTasks, &task)
+		c.IdleReduceTasks[i] = &task
 	}
 }
 
@@ -160,12 +168,27 @@ func (c *Coordinator) startExpiredTaskCleaner() {
 				return // Exit the goroutine cleanly
 			case <-ticker.C:
 				c.TaskLock.Lock()
-				removeExpiredTasks[*MapTask](c, &c.ProcessingMapTasks, &c.IdleMapTasks)
-				removeExpiredTasks[*ReduceTask](c, &c.ProcessingReduceTasks, &c.IdleReduceTasks)
+				moveExpiredTasksFromProcessingToIdle(c, c.ProcessingMapTasks, c.IdleMapTasks)
+				moveExpiredTasksFromProcessingToIdle(c, c.ProcessingReduceTasks, c.IdleReduceTasks)
 				c.TaskLock.Unlock()
 			}
 		}
 	}()
+}
+
+func moveExpiredTasksFromProcessingToIdle[K comparable, V Task](c *Coordinator, from map[K]V, to map[K]V) {
+	shouldWakeUp := false
+	for id, task := range from {
+		if task.IsExpired() {
+			to[id] = task
+			delete(from, id)
+			shouldWakeUp = true
+		}
+	}
+
+	if shouldWakeUp {
+		c.TaskCondVar.Broadcast()
+	}
 }
 
 // create a Coordinator.
