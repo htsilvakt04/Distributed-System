@@ -38,13 +38,13 @@ func (t *ReduceTask) GetProcessedTime() int64 {
 }
 
 type MapTask struct {
-	InputFileName string
+	InputFileName string // id
 	NumReducer    int
 	MapTaskNumber int
 	ProcessedTime int64 // epoch time
 }
 type ReduceTask struct {
-	ReduceTaskNumber      int
+	ReduceTaskNumber      int // id
 	TotalNumberOfMapTasks int
 	ProcessedTime         int64 // epoch time
 }

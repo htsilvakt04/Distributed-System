@@ -55,7 +55,7 @@ func (c *Coordinator) GetReduceTask(args *GetTaskArgs, reply *GetTaskReply) (*Re
 	return nil, nil
 }
 
-func removeExpiredTasks[T Task](from *[]T, to *[]T) {
+func removeExpiredTasks[T Task](c *Coordinator, from *[]T, to *[]T) {
 	tasks := *from
 	i := 0
 	for i < len(tasks) {
@@ -63,6 +63,7 @@ func removeExpiredTasks[T Task](from *[]T, to *[]T) {
 		if task.IsExpired() {
 			*to = append(*to, task)
 			tasks = append(tasks[:i], tasks[i+1:]...)
+			c.TaskCondVar.Broadcast()
 		} else {
 			i++
 		}

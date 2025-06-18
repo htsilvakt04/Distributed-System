@@ -49,7 +49,28 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 	reply.Y = args.X + 1
 	return nil
 }
-
+func (c *Coordinator) NotifyTaskSuccess(args *NotifyTaskSuccessArgs, reply *NotifyTaskSuccessReply) error {
+	c.TaskLock.Lock()
+	defer c.TaskLock.Unlock()
+	if args.TaskType == MapTaskType {
+		for _, task := range c.ProcessingMapTasks {
+			if args.InputFileName == task.InputFileName {
+				task.ProcessedTime = 0 // reset processed time
+				c.FinishedMapTasks = append(c.FinishedMapTasks, task)
+				// remove from processing tasks
+				for i, t := range c.ProcessingMapTasks {
+					if t == task {
+						c.ProcessingMapTasks = append(c.ProcessingMapTasks[:i], c.ProcessingMapTasks[i+1:]...)
+						break
+					}
+				}
+				DPrintf("Worker %s completed map task %d", args.Address, task.MapTaskNumber)
+				c.TaskCondVar.Broadcast() // notify waiting workers
+				return nil
+			}
+		}
+	}
+}
 func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 	DPrintf("Process %s is requesting a task", args.Address)
 	map_task, err := c.GetMapTask(args, reply)
@@ -139,8 +160,8 @@ func (c *Coordinator) startExpiredTaskCleaner() {
 				return // Exit the goroutine cleanly
 			case <-ticker.C:
 				c.TaskLock.Lock()
-				removeExpiredTasks[*MapTask](&c.ProcessingMapTasks, &c.IdleMapTasks)
-				removeExpiredTasks[*ReduceTask](&c.ProcessingReduceTasks, &c.IdleReduceTasks)
+				removeExpiredTasks[*MapTask](c, &c.ProcessingMapTasks, &c.IdleMapTasks)
+				removeExpiredTasks[*ReduceTask](c, &c.ProcessingReduceTasks, &c.IdleReduceTasks)
 				c.TaskLock.Unlock()
 			}
 		}
