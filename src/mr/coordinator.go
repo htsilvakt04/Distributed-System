@@ -11,14 +11,6 @@ import "net/rpc"
 import "net/http"
 import "context"
 
-const Debug = false
-
-func DPrintf(format string, a ...interface{}) {
-	if Debug {
-		log.Printf(format, a...)
-	}
-}
-
 type Coordinator struct {
 	Files   []string
 	NReduce int
@@ -54,7 +46,7 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 func (c *Coordinator) NotifyTaskSuccess(args *NotifyTaskSuccessArgs, reply *NotifyTaskSuccessReply) error {
 	c.TaskLock.Lock()
 	defer c.TaskLock.Unlock()
-	DPrintf("Worker %s notified the completion of task of type %s", args.Address, args.TaskType)
+	log.Printf("Worker %s notified the completion of task of type %s", args.Address, args.TaskType)
 
 	if args.TaskType == MapTaskType {
 		moveProcessingTaskToFinish[string, *MapTask](c, args.InputFileName, c.ProcessingMapTasks, c.FinishedMapTasks)
@@ -78,24 +70,24 @@ func moveProcessingTaskToFinish[K comparable, V Task](c *Coordinator, taskId K, 
 }
 
 func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
-	DPrintf("Process %s is requesting a task", args.Address)
-	map_task, err := c.GetMapTask(args, reply)
+	log.Printf("Process %s is requesting a task", args.Address)
+	mapTask, err := c.GetMapTask(args, reply)
 	if err != nil {
-		DPrintf("Error getting map task for %s: %v", args.Address, err)
+		log.Printf("Error getting map task for %s: %v", args.Address, err)
 		reply.Error = err.Error()
 		return nil
 	}
-	if map_task != nil {
+	if mapTask != nil {
 		return nil
 	}
 	// If no map task is available, try to get a reduce task
-	reduce_task, err := c.GetReduceTask(args, reply)
+	reduceTask, err := c.GetReduceTask(args, reply)
 	if err != nil {
-		DPrintf("Error getting reduce task for %s: %v", args.Address, err)
+		log.Printf("Error getting reduce task for %s: %v", args.Address, err)
 		reply.Error = err.Error()
 		return nil
 	}
-	if reduce_task != nil {
+	if reduceTask != nil {
 		return nil
 	}
 	// If no tasks are available, set Done to true
@@ -120,19 +112,30 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	ret := true
-	if ret {
-		c.cancel()
+	c.TaskLock.Lock()
+	defer c.TaskLock.Unlock()
+	if len(c.FinishedMapTasks) < c.NumMapTask() || len(c.FinishedReduceTasks) < c.NReduce {
+		return false
 	}
-	// Your code here.
-
-	return ret
+	c.cancel()
+	return true
 }
 
 func (c *Coordinator) Init(files []string, nReduce int) {
 	ctx, cancel := context.WithCancel(context.Background())
+	//Initialize the maps
+	c.TaskCondVar = *sync.NewCond(&c.TaskLock)
 	c.ctx = ctx
 	c.cancel = cancel
+	c.Files = files
+	c.NReduce = nReduce
+	c.IdleMapTasks = make(map[string]*MapTask)
+	c.ProcessingMapTasks = make(map[string]*MapTask)
+	c.FinishedMapTasks = make(map[string]*MapTask)
+
+	c.IdleReduceTasks = make(map[int]*ReduceTask)
+	c.ProcessingReduceTasks = make(map[int]*ReduceTask)
+	c.FinishedReduceTasks = make(map[int]*ReduceTask)
 
 	// Initialize idle map tasks
 	for i, file := range files {
@@ -194,6 +197,7 @@ func moveExpiredTasksFromProcessingToIdle[K comparable, V Task](c *Coordinator, 
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
+	registerLogFile("coordinator.log")
 	c.Init(files, nReduce)
 	c.startExpiredTaskCleaner()
 	c.server()

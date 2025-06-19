@@ -1,6 +1,9 @@
 package mr
 
-import "time"
+import (
+	"log"
+	"time"
+)
 
 func (c *Coordinator) GetMapTask(args *GetTaskArgs, reply *GetTaskReply) (*MapTask, error) {
 	c.TaskLock.Lock()
@@ -9,7 +12,7 @@ func (c *Coordinator) GetMapTask(args *GetTaskArgs, reply *GetTaskReply) (*MapTa
 	for len(c.FinishedMapTasks) < c.NumMapTask() {
 		// have no idle tasks, then sleep
 		if len(c.IdleMapTasks) == 0 {
-			DPrintf("No idle map tasks available, worker %s will wait", args.Address)
+			log.Printf("No idle map tasks available, worker %s will wait", args.Address)
 			c.TaskCondVar.Wait()
 		} else {
 			var task *MapTask
@@ -18,7 +21,7 @@ func (c *Coordinator) GetMapTask(args *GetTaskArgs, reply *GetTaskReply) (*MapTa
 				break
 			}
 			if task == nil {
-				DPrintf("Internal error: no idle map tasks found for worker %s", args.Address)
+				log.Printf("Internal error: no idle map tasks found for worker %s", args.Address)
 				panic("No idle map tasks found")
 			}
 			// remove from idle tasks
@@ -31,7 +34,7 @@ func (c *Coordinator) GetMapTask(args *GetTaskArgs, reply *GetTaskReply) (*MapTa
 			reply.TaskType = MapTaskType
 			reply.MapTask = task
 			reply.ReduceTask = nil
-			DPrintf("Assigned map task %d to %s", task.MapTaskNumber, args.Address)
+			log.Printf("Assigned map task %d to %s", task.MapTaskNumber, args.Address)
 			return task, nil
 		}
 	}
@@ -44,7 +47,7 @@ func (c *Coordinator) GetReduceTask(args *GetTaskArgs, reply *GetTaskReply) (*Re
 	for len(c.FinishedReduceTasks) < c.NReduce {
 		// have no idle tasks, then sleep
 		if len(c.IdleReduceTasks) == 0 {
-			DPrintf("No idle reduce tasks available, worker %s will wait", args.Address)
+			log.Printf("No idle reduce tasks available, worker %s will wait", args.Address)
 			c.TaskCondVar.Wait()
 		} else {
 			var task *ReduceTask
@@ -53,7 +56,7 @@ func (c *Coordinator) GetReduceTask(args *GetTaskArgs, reply *GetTaskReply) (*Re
 				break
 			}
 			if task == nil {
-				DPrintf("Internal error: no idle map tasks found for worker %s", args.Address)
+				log.Printf("Internal error: no idle map tasks found for worker %s", args.Address)
 				panic("No idle map tasks found")
 			}
 
@@ -66,7 +69,7 @@ func (c *Coordinator) GetReduceTask(args *GetTaskArgs, reply *GetTaskReply) (*Re
 			reply.TaskType = ReduceTaskType
 			reply.MapTask = nil
 			reply.ReduceTask = task
-			DPrintf("Assigned reduce task %d to %s", task.ReduceTaskNumber, args.Address)
+			log.Printf("Assigned reduce task %d to %s", task.ReduceTaskNumber, args.Address)
 			return task, nil
 		}
 	}

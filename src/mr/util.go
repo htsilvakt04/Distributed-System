@@ -16,5 +16,6 @@ func ReadKVFromFile(filename string, mapf func(string, string) []KeyValue) []Key
 		log.Fatalf("cannot read %v", filename)
 	}
 	file.Close()
-	return mapf(filename, string(content))
+	kva := mapf(filename, string(content))
+	return kva
 }

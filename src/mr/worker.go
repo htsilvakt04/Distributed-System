@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 	"sort"
+	"sync"
 	"time"
 )
 import "log"
@@ -36,47 +38,67 @@ func ihash(key string) int {
 
 // main/mrworker.go calls this function.
 func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
+	registerLogFile("worker.log")
+	var wg sync.WaitGroup
 	// CallExample()
 	args := GetTaskArgs{Address: coordinatorSock()}
 	retryCount := 0
 	for {
 		reply := GetTaskReply{}
-		DPrintf("worker calling GetTask with args: %+v", args)
+		log.Printf("worker calling GetTask with args: %+v", args)
 		ok := call("Coordinator.GetTask", &args, &reply)
 
 		if !ok {
 			retryCount++
 			if retryCount > 2 {
-				DPrintf("Shutting down worker after retrying 2 times to get a task")
+				log.Printf("Shutting down worker after retrying 2 times to get a task")
 				return
 			}
 
-			DPrintf("GetTask failed, retrying... (%d)", retryCount)
+			log.Printf("GetTask failed, retrying... (%d)", retryCount)
 			time.Sleep(time.Second)
 			continue
 		}
 		// reset retry count on successful call
 		retryCount = 0
 		if reply.Done {
-			DPrintf("No more tasks available, worker shutting down")
+			log.Printf("No more tasks available, waiting for running tasks to finish")
+			wg.Wait()
+			log.Printf("All tasks done, worker shutting down")
 			return
 		}
 		// unrecoverable error from server
 		if reply.Error != "" {
-			DPrintf("Error from server %s", reply.Error)
+			log.Printf("Error from server %s", reply.Error)
 			return
 		}
-
+		wg.Add(1)
 		// process the task
 		if reply.TaskType == MapTaskType {
-			handleMapTask(reply.MapTask, mapf)
-			notifyTaskSuccess(MapTaskType, reply.MapTask.InputFileName, 0)
+			go func(rep GetTaskReply, mf func(string, string) []KeyValue) {
+				defer wg.Done()
+				handleMapTask(rep.MapTask, mf)
+				notifyTaskSuccess(MapTaskType, rep.MapTask.InputFileName, 0)
+			}(reply, mapf)
 		}
 		if reply.TaskType == ReduceTaskType {
-			handleReduceTask(reply.ReduceTask, reducef)
-			notifyTaskSuccess(ReduceTaskType, "", reply.ReduceTask.ReduceTaskNumber)
+			go func(rep GetTaskReply, red func(string, []string) string) {
+				defer wg.Done()
+				handleReduceTask(rep.ReduceTask, red)
+				notifyTaskSuccess(ReduceTaskType, "", rep.ReduceTask.ReduceTaskNumber)
+			}(reply, reducef)
 		}
 	} // end for loop
+}
+
+func registerLogFile(filename string) {
+	logFile, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		fmt.Printf("Failed to open log file:", err)
+		os.Exit(1)
+	}
+	log.SetOutput(logFile)
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
 }
 
 func notifyTaskSuccess(taskType TaskType, mapFile string, reduceNum int) {
@@ -89,11 +111,12 @@ func notifyTaskSuccess(taskType TaskType, mapFile string, reduceNum int) {
 	reply := NotifyTaskSuccessReply{}
 	ok := call("Coordinator.NotifyTaskSuccess", &args, &reply)
 	if !ok {
-		DPrintf("Failed to notify coordinator about task success for task type %s, map file %s, reduce number %d", taskType, mapFile, reduceNum)
+		log.Printf("Failed to notify coordinator about task success for task type %s, map file %s, reduce number %d", taskType, mapFile, reduceNum)
 	} else {
-		DPrintf("Successfully notified coordinator about task success for task type %s, map file %s, reduce number %d", taskType, mapFile, reduceNum)
+		log.Printf("Successfully notified coordinator about task success for task type %s, map file %s, reduce number %d", taskType, mapFile, reduceNum)
 	}
 }
+
 func handleMapTask(task *MapTask, mapf func(string, string) []KeyValue) {
 	// read from input file, to create a list of kv pairs
 	kvs := ReadKVFromFile(task.InputFileName, mapf)
@@ -112,19 +135,22 @@ func handleMapTask(task *MapTask, mapf func(string, string) []KeyValue) {
 		fileContentMap[outputFileName] = append(fileContentMap[outputFileName], values...)
 	}
 
-	DPrintf("Map task %d processed input file %s, outputting to %d files", task.MapTaskNumber, task.InputFileName, len(fileContentMap))
+	log.Printf("Map task %d processed input file %s, outputting to %d files", task.MapTaskNumber, task.InputFileName, len(fileContentMap))
 	// write the fileContentMap to output files
 	for outputFileName, values := range fileContentMap {
 		file, err := os.OpenFile(outputFileName, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 		if err != nil {
-			DPrintf("cannot open %v", outputFileName)
+			//log.Printf()("cannot open %v", outputFileName)
+			log.Printf("cannot open %v: %v\n%s", outputFileName, err, debug.Stack())
 		}
 		enc := json.NewEncoder(file)
 		if err := enc.Encode(&values); err != nil {
-			DPrintf("cannot write to %v: %v", outputFileName, err)
+			log.Printf("cannot write to %v: %v\n%s", outputFileName, err, debug.Stack())
+			//log.Printf()("cannot write to %v: %v", outputFileName, err)
 		}
 		if err := file.Close(); err != nil {
-			DPrintf("cannot close %v: %v", outputFileName, err)
+			log.Printf("cannot close %v: %v\n%s", outputFileName, err, debug.Stack())
+			//log.Printf()("cannot close %v: %v", outputFileName, err)
 		}
 	}
 }
@@ -133,7 +159,7 @@ func handleReduceTask(task *ReduceTask, reducef func(string, []string) string) {
 	// collect all files that match the pattern mr-*-<task.ReduceTaskNumber> to intermediate
 	var intermediate []KeyValue
 	if !collectKVs(task, &intermediate) {
-		DPrintf("Failed to collect key-value pairs for reduce task %d", task.ReduceTaskNumber)
+		log.Printf("Failed to collect key-value pairs for reduce task %d", task.ReduceTaskNumber)
 		return
 	}
 	// sort them
@@ -141,9 +167,9 @@ func handleReduceTask(task *ReduceTask, reducef func(string, []string) string) {
 
 	outFileName := fmt.Sprintf("mr-out-%d", task.ReduceTaskNumber)
 	// avoid partial writes by using temporary file
-	tempFile, err := os.CreateTemp("", "mr-reduce-")
+	tempFile, err := os.CreateTemp(".", "mr-reduce-")
 	if err != nil {
-		DPrintf("cannot create temporary file for reduce output: %v", err)
+		log.Printf("cannot create temporary file for reduce output: %v", err)
 		return
 	}
 
@@ -168,15 +194,15 @@ func handleReduceTask(task *ReduceTask, reducef func(string, []string) string) {
 
 		// write the output to the temporary file
 		if _, err := fmt.Fprintf(tempFile, "%v %v\n", intermediate[i].Key, output); err != nil {
-			DPrintf("cannot write to temporary file: %v", err)
+			log.Printf("cannot write to temporary file: %v", err)
 		}
 		i = j
 	}
 
 	if err := os.Rename(tempFile.Name(), outFileName); err != nil {
-		DPrintf("cannot rename temporary file to output file %s: %v", outFileName, err)
+		log.Printf("cannot rename temporary file to output file %s: %v", outFileName, err)
 	} else {
-		DPrintf("Reduce task %d successfully wrote output to file %s", task.ReduceTaskNumber, outFileName)
+		log.Printf("Reduce task %d successfully wrote output to file %s", task.ReduceTaskNumber, outFileName)
 	}
 }
 
@@ -187,20 +213,20 @@ func collectKVs(task *ReduceTask, kva *[]KeyValue) bool {
 		filename := fmt.Sprintf("mr-%d-%d", i, task.ReduceTaskNumber)
 		file, err := os.Open(filename)
 		if err != nil {
-			log.Fatalf("cannot open %v", filename)
-			return false
+			log.Printf("cannot open %v: %v\n%s", filename, err, debug.Stack())
+			continue
 		}
 		dec := json.NewDecoder(file)
+		var kvs []KeyValue
 		for {
-			var kv KeyValue
-			if err := dec.Decode(&kv); err != nil {
+			if err := dec.Decode(&kvs); err != nil {
 				if err == io.EOF {
 					break
 				}
-
-				DPrintf("cannot decode %v", filename)
+				log.Fatalf("cannot decode %v: %v", filename, err)
+				return false
 			}
-			*kva = append(*kva, kv)
+			*kva = append(*kva, kvs...)
 		}
 		if err := file.Close(); err != nil {
 			log.Fatalf("cannot close %v: %v", filename, err)
