@@ -68,8 +68,6 @@ func (c *Coordinator) NotifyTaskSuccess(args *NotifyTaskSuccessArgs, reply *Noti
 func moveProcessingTaskToFinish[K comparable, V Task](c *Coordinator, taskId K, processingMap map[K]V, finishMap map[K]V) {
 	for id, task := range processingMap {
 		if taskId == id {
-			// reset processed time
-			task.resetProcessedTime()
 			// move to finished tasks
 			finishMap[id] = task
 			// remove from processing tasks

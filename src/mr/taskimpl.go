@@ -12,12 +12,21 @@ func (c *Coordinator) GetMapTask(args *GetTaskArgs, reply *GetTaskReply) (*MapTa
 			DPrintf("No idle map tasks available, worker %s will wait", args.Address)
 			c.TaskCondVar.Wait()
 		} else {
-			task := c.IdleMapTasks[0]
-			task.ProcessedTime = time.Now().Unix()
+			var task *MapTask
+			for _, t := range c.IdleMapTasks {
+				task = t
+				break
+			}
+			if task == nil {
+				DPrintf("Internal error: no idle map tasks found for worker %s", args.Address)
+				panic("No idle map tasks found")
+			}
 			// remove from idle tasks
-			c.IdleMapTasks = c.IdleMapTasks[1:]
+			delete(c.IdleMapTasks, task.InputFileName)
+
 			// move to processing tasks
-			c.ProcessingMapTasks = append(c.ProcessingMapTasks, task)
+			task.ProcessedTime = time.Now().Unix()
+			c.ProcessingMapTasks[task.InputFileName] = task
 
 			reply.TaskType = MapTaskType
 			reply.MapTask = task
@@ -38,12 +47,21 @@ func (c *Coordinator) GetReduceTask(args *GetTaskArgs, reply *GetTaskReply) (*Re
 			DPrintf("No idle reduce tasks available, worker %s will wait", args.Address)
 			c.TaskCondVar.Wait()
 		} else {
-			task := c.IdleReduceTasks[0]
+			var task *ReduceTask
+			for _, t := range c.IdleReduceTasks {
+				task = t
+				break
+			}
+			if task == nil {
+				DPrintf("Internal error: no idle map tasks found for worker %s", args.Address)
+				panic("No idle map tasks found")
+			}
+
 			task.ProcessedTime = time.Now().Unix()
 			// remove from idle tasks
-			c.IdleReduceTasks = c.IdleReduceTasks[1:]
+			delete(c.IdleReduceTasks, task.ReduceTaskNumber)
 			// move to processing tasks
-			c.ProcessingReduceTasks = append(c.ProcessingReduceTasks, task)
+			c.ProcessingReduceTasks[task.ReduceTaskNumber] = task
 
 			reply.TaskType = ReduceTaskType
 			reply.MapTask = nil

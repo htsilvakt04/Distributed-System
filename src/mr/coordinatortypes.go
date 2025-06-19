@@ -14,15 +14,8 @@ const (
 type Task interface {
 	IsExpired() bool
 	GetProcessedTime() int64
-	resetProcessedTime()
 }
 
-func (t *MapTask) resetProcessedTime() {
-	t.ProcessedTime = 0
-}
-func (t *ReduceTask) resetProcessedTime() {
-	t.ProcessedTime = 0
-}
 func (t *MapTask) IsExpired() bool {
 	if t.ProcessedTime == 0 {
 		return false
