@@ -7,6 +7,7 @@ import (
 	"os"
 	"runtime/debug"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -40,8 +41,10 @@ func ihash(key string) int {
 func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
 	registerLogFile("worker.log")
 	var wg sync.WaitGroup
-	// CallExample()
-	args := GetTaskArgs{Address: coordinatorSock()}
+	var mapTaskLock sync.Mutex
+	var reduceTaskLock sync.Mutex
+
+	args := GetTaskArgs{PId: strconv.Itoa(os.Getpid())}
 	retryCount := 0
 	for {
 		reply := GetTaskReply{}
@@ -75,19 +78,22 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 		wg.Add(1)
 		// process the task
 		if reply.TaskType == MapTaskType {
+			log.Printf("Map worker process filename %s and done?: %t", reply.MapTask.InputFileName, reply.Done)
 			go func(rep GetTaskReply, mf func(string, string) []KeyValue) {
 				defer wg.Done()
-				handleMapTask(rep.MapTask, mf)
+				handleMapTask(&mapTaskLock, rep.MapTask, mf)
 				notifyTaskSuccess(MapTaskType, rep.MapTask.InputFileName, 0)
 			}(reply, mapf)
 		}
 		if reply.TaskType == ReduceTaskType {
 			go func(rep GetTaskReply, red func(string, []string) string) {
 				defer wg.Done()
-				handleReduceTask(rep.ReduceTask, red)
+				handleReduceTask(&reduceTaskLock, rep.ReduceTask, red)
 				notifyTaskSuccess(ReduceTaskType, "", rep.ReduceTask.ReduceTaskNumber)
 			}(reply, reducef)
 		}
+
+		time.Sleep(1 * time.Second)
 	} // end for loop
 }
 
@@ -117,9 +123,9 @@ func notifyTaskSuccess(taskType TaskType, mapFile string, reduceNum int) {
 	}
 }
 
-func handleMapTask(task *MapTask, mapf func(string, string) []KeyValue) {
+func handleMapTask(taskLock *sync.Mutex, task *MapTask, mapf func(string, string) []KeyValue) {
 	// read from input file, to create a list of kv pairs
-	kvs := ReadKVFromFile(task.InputFileName, mapf)
+	kvs := ReadKVFromFile(taskLock, task.InputFileName, mapf)
 	// reduce the list of kv pairs to a map
 	kvsMap := make(map[string][]KeyValue)
 	for _, kv := range kvs {
@@ -140,22 +146,19 @@ func handleMapTask(task *MapTask, mapf func(string, string) []KeyValue) {
 	for outputFileName, values := range fileContentMap {
 		file, err := os.OpenFile(outputFileName, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 		if err != nil {
-			//log.Printf()("cannot open %v", outputFileName)
 			log.Printf("cannot open %v: %v\n%s", outputFileName, err, debug.Stack())
 		}
 		enc := json.NewEncoder(file)
 		if err := enc.Encode(&values); err != nil {
 			log.Printf("cannot write to %v: %v\n%s", outputFileName, err, debug.Stack())
-			//log.Printf()("cannot write to %v: %v", outputFileName, err)
 		}
 		if err := file.Close(); err != nil {
 			log.Printf("cannot close %v: %v\n%s", outputFileName, err, debug.Stack())
-			//log.Printf()("cannot close %v: %v", outputFileName, err)
 		}
 	}
 }
 
-func handleReduceTask(task *ReduceTask, reducef func(string, []string) string) {
+func handleReduceTask(taskLock *sync.Mutex, task *ReduceTask, reducef func(string, []string) string) {
 	// collect all files that match the pattern mr-*-<task.ReduceTaskNumber> to intermediate
 	var intermediate []KeyValue
 	if !collectKVs(task, &intermediate) {
@@ -190,8 +193,9 @@ func handleReduceTask(task *ReduceTask, reducef func(string, []string) string) {
 		for k := i; k < j; k++ {
 			values = append(values, intermediate[k].Value)
 		}
+		taskLock.Lock()
 		output := reducef(intermediate[i].Key, values)
-
+		taskLock.Unlock()
 		// write the output to the temporary file
 		if _, err := fmt.Fprintf(tempFile, "%v %v\n", intermediate[i].Key, output); err != nil {
 			log.Printf("cannot write to temporary file: %v", err)
@@ -212,8 +216,7 @@ func collectKVs(task *ReduceTask, kva *[]KeyValue) bool {
 	for i := 0; i < task.TotalNumberOfMapTasks; i++ {
 		filename := fmt.Sprintf("mr-%d-%d", i, task.ReduceTaskNumber)
 		file, err := os.Open(filename)
-		if err != nil {
-			log.Printf("cannot open %v: %v\n%s", filename, err, debug.Stack())
+		if err != nil && !os.IsExist(err) {
 			continue
 		}
 		dec := json.NewDecoder(file)

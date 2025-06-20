@@ -20,9 +20,8 @@ type GetTaskReply struct {
 }
 
 type GetTaskArgs struct {
-	Address string
+	PId string
 }
-
 type NotifyTaskSuccessArgs struct {
 	TaskType         TaskType
 	InputFileName    string // valid only if TaskType == MapTaskType
