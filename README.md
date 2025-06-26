@@ -1,3 +1,10 @@
+# Table of Contents
+
+- [Lab01: Distributed MapReduce in Go](#lab01-distributed-mapreduce-in-go)
+- [Lab02: Key/Value Server and Distributed Lock](#lab02-keyvalue-server-and-distributed-lock)
+
+---
+
 # Lab01: Distributed MapReduce in Go
 
 ## Overview
@@ -13,8 +20,6 @@ The system supports:
 
 The implementation consists of a **Coordinator** (master) process and multiple **Worker** processes communicating over Go RPC on a shared filesystem.
 
----
-
 ## Fault Tolerance
 
 - Coordinator reassigns tasks that timeout
@@ -22,31 +27,18 @@ The implementation consists of a **Coordinator** (master) process and multiple *
 - Coordinator and workers terminate cleanly when the job completes
 - Uses atomic writes (via temporary files and renaming) to prevent partial file writes on crash
 
----
-
 ## File Layout
 
 - [`src/`](src/)
-    - [`main/`](src/main/)
-        - [`mrcoordinator.go`](src/main/mrcoordinator.go) – Entry point for Coordinator
-        - [`mrworker.go`](src/main/mrworker.go) – Entry point for Worker
-        - [`mrsequential.go`](src/main/mrsequential.go) – Reference sequential implementation
-        - [`test-mr.sh`](src/main/test-mr.sh) – Automated test suite
     - [`mr/`](src/mr/)
-        - [`coordinator.go`](src/mr/coordinator.go) – Your Coordinator implementation
-        - [`worker.go`](src/mr/worker.go) – Your Worker implementation
+        - [`coordinator.go`](src/mr/coordinator.go) – Coordinator implementation
+        - [`worker.go`](src/mr/worker.go) – Worker implementation
         - [`rpc.go`](src/mr/rpc.go) – Shared RPC types
-    - [`mrapps/`](src/mrapps/)
-        - [`wc.go`](src/mrapps/wc.go) – Word count application plugin
-        - [`indexer.go`](src/mrapps/indexer.go) – Text indexing plugin
-
-
 
 ## Testing
 ![Lab01 result](images/Lab01.png)
 
 ---
-
 # Lab02: Key/Value Server and Distributed Lock
 
 ## Overview
@@ -59,10 +51,7 @@ This project implements a **key/value server** for a single machine that:
 
 The final server is robust to dropped, delayed, or re-ordered network messages, while offering a simple, predictable interface to clients.
 
----
-
 ## Features Implemented
-
 ### ✅ Reliable KV Server
 - Handles `Put` and `Get` RPCs from clients.
 - Maintains an in-memory map: `map[key] = (value, version)`.
