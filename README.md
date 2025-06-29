@@ -30,20 +30,10 @@ The implementation consists of a **Coordinator** (master) process and multiple *
 ## File Layout
 
 - [`src/`](src/)
-    - [`main/`](src/main/)
-        - [`mrcoordinator.go`](src/main/mrcoordinator.go) – Entry point for Coordinator
-        - [`mrworker.go`](src/main/mrworker.go) – Entry point for Worker
-        - [`mrsequential.go`](src/main/mrsequential.go) – Reference sequential implementation
-        - [`test-mr.sh`](src/main/test-mr.sh) – Automated test suite
     - [`mr/`](src/mr/)
-        - [`coordinator.go`](src/mr/coordinator.go) – Your Coordinator implementation
-        - [`worker.go`](src/mr/worker.go) – Your Worker implementation
+        - [`coordinator.go`](src/mr/coordinator.go) – Coordinator implementation
+        - [`worker.go`](src/mr/worker.go) – Worker implementation
         - [`rpc.go`](src/mr/rpc.go) – Shared RPC types
-    - [`mrapps/`](src/mrapps/)
-        - [`wc.go`](src/mrapps/wc.go) – Word count application plugin
-        - [`indexer.go`](src/mrapps/indexer.go) – Text indexing plugin
-
-
 
 ## Testing
 ![Lab01 result](images/Lab01.png)
