@@ -1,3 +1,10 @@
+# Table of Contents
+
+- [Lab01: Distributed MapReduce in Go](#lab01-distributed-mapreduce-in-go)
+- [Lab02: Key/Value Server and Distributed Lock](#lab02-keyvalue-server-and-distributed-lock)
+
+---
+
 # Lab01: Distributed MapReduce in Go
 
 ## Overview
@@ -13,16 +20,12 @@ The system supports:
 
 The implementation consists of a **Coordinator** (master) process and multiple **Worker** processes communicating over Go RPC on a shared filesystem.
 
----
-
 ## Fault Tolerance
 
 - Coordinator reassigns tasks that timeout
 - Workers handle RPC errors gracefully
 - Coordinator and workers terminate cleanly when the job completes
 - Uses atomic writes (via temporary files and renaming) to prevent partial file writes on crash
-
----
 
 ## File Layout
 
@@ -46,7 +49,6 @@ The implementation consists of a **Coordinator** (master) process and multiple *
 ![Lab01 result](images/Lab01.png)
 
 ---
-
 # Lab02: Key/Value Server and Distributed Lock
 
 ## Overview
@@ -59,10 +61,7 @@ This project implements a **key/value server** for a single machine that:
 
 The final server is robust to dropped, delayed, or re-ordered network messages, while offering a simple, predictable interface to clients.
 
----
-
 ## Features Implemented
-
 ### ✅ Reliable KV Server
 - Handles `Put` and `Get` RPCs from clients.
 - Maintains an in-memory map: `map[key] = (value, version)`.
