@@ -37,3 +37,8 @@ type ApplyMsg struct {
 	SnapshotTerm  int
 	SnapshotIndex int
 }
+type LogEntry struct {
+	Command interface{} // the command for the entry
+	Term    int         // the term when this entry was received by the leader
+	Index   int
+}

@@ -25,9 +25,10 @@ for line in lines:
         })
 
 # Group by time
-by_time = defaultdict(dict)
+by_time = defaultdict(lambda: defaultdict(list))
 for e in entries:
-    by_time[e["time"]][e["server"]] = e["msg"]
+    by_time[e["time"]][e["server"]].append(e["msg"])
+
 
 times = sorted(by_time.keys())
 servers = sorted(set(e["server"] for e in entries))
@@ -39,15 +40,15 @@ for s in servers:
     table.add_column(f"S{s}")
 
 colors = ["green", "yellow", "cyan", "magenta", "red"]
-
 for t in times:
-    short_time = str(t)[-6:]
+    short_time = str(t)[-8:]
     row = [short_time]
     for s in servers:
-        msg = by_time[t].get(s, "")
+        msgs = by_time[t].get(s, [])
         color = colors[s % len(colors)]
-        if msg:
-            row.append(f"[{color}]{msg}[/]")
+        if msgs:
+            joined = " | ".join(msgs)
+            row.append(f"[{color}]{joined}[/]")
         else:
             row.append("")
     table.add_row(*row)
