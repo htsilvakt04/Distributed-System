@@ -9,7 +9,9 @@ package raft
 //
 
 import (
-	"6.5840/tester1"
+	tester "6.5840/tester1"
+	"fmt"
+	"math/rand"
 	"testing"
 	"time"
 )
@@ -17,6 +19,36 @@ import (
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
 const RaftElectionTimeout = 1000 * time.Millisecond
+
+func TestInitialElection3A(t *testing.T) {
+	servers := 3
+	ts := makeTest(t, servers, true, false)
+	defer ts.cleanup()
+
+	tester.AnnotateTest("TestInitialElection3A", servers)
+	ts.Begin("Test (3A): initial election")
+
+	// is a leader elected?
+	ts.checkOneLeader()
+
+	// sleep a bit to avoid racing with followers learning of the
+	// election, then check that all peers agree on the term.
+	time.Sleep(50 * time.Millisecond)
+	term1 := ts.checkTerms()
+	if term1 < 1 {
+		ts.t.Fatalf("term is %v, but should be at least 1", term1)
+	}
+
+	// does the leader+term stay the same if there is no network failure?
+	time.Sleep(2 * RaftElectionTimeout)
+	term2 := ts.checkTerms()
+	if term1 != term2 {
+		fmt.Printf("warning: term changed even though there were no failures")
+	}
+
+	// there should still be a leader.
+	ts.checkOneLeader()
+}
 
 func TestReElection3A(t *testing.T) {
 	servers := 3
@@ -62,38 +94,6 @@ func TestReElection3A(t *testing.T) {
 	ts.checkOneLeader()
 }
 
-/*
-func TestInitialElection3A(t *testing.T) {
-	servers := 3
-	ts := makeTest(t, servers, true, false)
-	defer ts.cleanup()
-
-	tester.AnnotateTest("TestInitialElection3A", servers)
-	ts.Begin("Test (3A): initial election")
-
-	// is a leader elected?
-	ts.checkOneLeader()
-
-	// sleep a bit to avoid racing with followers learning of the
-	// election, then check that all peers agree on the term.
-	time.Sleep(50 * time.Millisecond)
-	term1 := ts.checkTerms()
-	if term1 < 1 {
-		ts.t.Fatalf("term is %v, but should be at least 1", term1)
-	}
-
-	// does the leader+term stay the same if there is no network failure?
-	time.Sleep(2 * RaftElectionTimeout)
-	term2 := ts.checkTerms()
-	if term1 != term2 {
-		fmt.Printf("warning: term changed even though there were no failures")
-	}
-
-	// there should still be a leader.
-	ts.checkOneLeader()
-}
-
-
 func TestManyElections3A(t *testing.T) {
 	servers := 7
 	ts := makeTest(t, servers, true, false)
@@ -126,6 +126,8 @@ func TestManyElections3A(t *testing.T) {
 	}
 	ts.checkOneLeader()
 }
+
+/*
 
 
 func TestBasicAgree3B(t *testing.T) {
