@@ -9,11 +9,15 @@ package raft
 //
 
 import (
-	tester "6.5840/tester1"
 	"fmt"
+	// "log"
 	"math/rand"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"6.5840/tester1"
 )
 
 // The tester generously allows solutions to complete elections in one second
@@ -126,9 +130,6 @@ func TestManyElections3A(t *testing.T) {
 	}
 	ts.checkOneLeader()
 }
-
-/*
-
 
 func TestBasicAgree3B(t *testing.T) {
 	servers := 3
@@ -1385,4 +1386,3 @@ func TestSnapshotInit3D(t *testing.T) {
 	// do another op to trigger potential bug
 	ts.one(rand.Int(), servers, true)
 }
-*/
