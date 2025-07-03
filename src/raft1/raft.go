@@ -207,7 +207,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		DPrintf("[%d] not leader, cannot start command: %v", rf.me, command)
 		return index, term, isLeader
 	}
-
+	DPrintf("[%d] received start command: %v", rf.me, command)
 	// Create a new log entry, add it to the log, persist the state
 	lastRaftLogEntry := rf.getLastLogEntry()
 	rf.logs = append(rf.logs, &raftapi.LogEntry{
@@ -285,20 +285,21 @@ func (rf *Raft) attemptElection() {
 		go func() {
 			DPrintf("[%d] sendRequestVote to %d, args: %+v", rf.me, peerIdx, args)
 			ok := rf.sendRequestVote(peerIdx, args, reply)
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
 			if !ok {
-				DPrintf("[%d] failed to send RequestVote to %d", rf.me, peerIdx)
+				DPrintf("[%d] failed to send RequestVote to %d at term: %d, currentTerm: %d", rf.me, peerIdx, args.Term, rf.currentTerm)
 				return
 			}
 
 			DPrintf("[%d] sendRequestVote reply from %d, term: %d, voteGranted: %t, reject reson: %s", rf.me, peerIdx, reply.Term, reply.VoteGranted, reply.RejectReason)
-			rf.mu.Lock()
-			defer rf.mu.Unlock()
 			if rf.killed() || done || rf.currentTerm != lastTerm || rf.state == StateFollower {
 				return
 			}
 
 			// convert to follow if cond meet
-			if ok := rf.convertToFollower(reply.Term); ok {
+			if reply.Term > rf.currentTerm {
+				rf.convertToFollower(reply.Term)
 				done = true
 				return
 			}
@@ -339,14 +340,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Term = max(args.Term, rf.currentTerm)
 	reply.VoteGranted = false
 	raftLastLogEntry := rf.getLastLogEntry()
+	if args.Term > rf.currentTerm {
+		rf.convertToFollower(args.Term)
+	}
 
 	if args.Term < rf.currentTerm {
 		DPrintf("[%d] reject vote for %d, term %d is <= currentTerm %d", rf.me, args.CandidateId, args.Term, rf.currentTerm)
 		reply.RejectReason = "sender's term is <= currentTerm"
-	} else if rf.convertToFollower(args.Term) {
-		rf.votedFor = args.CandidateId
-		reply.VoteGranted = true
-		DPrintf("[%d] grant vote for %d, currentTerm: %d", rf.me, args.CandidateId, rf.currentTerm)
 	} else if rf.votedFor != -1 && rf.votedFor != args.CandidateId {
 		DPrintf("[%d] reject vote for %d, already voted for %d", rf.me, args.CandidateId, rf.votedFor)
 		reply.RejectReason = "already voted for: " + string(rune(rf.votedFor))
@@ -371,7 +371,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	rf.convertToFollower(args.Term)
+	if args.Term > rf.currentTerm || (args.LeaderCommit > rf.commitIndex && rf.state != StateFollower) {
+		rf.convertToFollower(args.Term)
+	}
+
 	reply.Term = rf.currentTerm
 	// stale leader
 	if args.Term < rf.currentTerm || (args.Term == rf.currentTerm && rf.state == StateLeader) {
@@ -402,6 +405,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		3. Entries from PrevLogIndex are consistent
 	*/
 	// Append the new entries to the log
+	DPrintf("[%d] logs before AppendEntries", rf.me)
+	for i, entry := range rf.logs {
+		DPrintf("[%d] log[%d] = %+v", rf.me, i, *entry)
+	}
 	for _, entry := range args.Entries {
 		// If the entry already exists, we only update it if the term is different\
 		if entry.Index <= rf.getLastLogEntry().Index {
@@ -416,6 +423,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 
+	DPrintf("[%d] logs after AppendEntries", rf.me)
+	for i, entry := range rf.logs {
+		DPrintf("[%d] log[%d] = %+v", rf.me, i, *entry)
+	}
 	// Update the commit index since the leader's commit index may be higher than us
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommit, rf.getLastLogEntry().Index)
@@ -459,15 +470,11 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return rf.peers[server].Call("Raft.RequestVote", args, reply)
 }
 
-func (rf *Raft) convertToFollower(otherTerm int) bool {
-	if otherTerm > rf.currentTerm {
-		rf.SetCurrentTerm(otherTerm)
-		DPrintf("[%d] convert to follower from state: %s, currentTerm: %d", rf.me, rf.state, rf.currentTerm)
-		rf.SetState(StateFollower)
-		rf.SetVotedFor(-1)
-		return true
-	}
-	return false
+func (rf *Raft) convertToFollower(otherTerm int) {
+	rf.SetCurrentTerm(otherTerm)
+	DPrintf("[%d] convert to follower from state: %s, currentTerm: %d", rf.me, rf.state, rf.currentTerm)
+	rf.SetState(StateFollower)
+	rf.SetVotedFor(-1)
 }
 
 func (rf *Raft) heartBeats() {
@@ -509,15 +516,15 @@ func (rf *Raft) heartBeat(peerIdx int) {
 	rf.mu.Unlock()
 	// Send the AppendEntries RPC to the peer
 	ok := rf.peers[peerIdx].Call("Raft.AppendEntries", args, reply)
-	if !ok {
-		DPrintf("[%d] failed to send AppendEntries to %d", rf.me, peerIdx)
-		return
-	}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	DPrintf("[%d] received AppendEntries reply from %d, ok: %t, term: %d, entries: %v", rf.me, peerIdx, ok, reply.Term, entriesToSend)
-
-	if rf.convertToFollower(reply.Term) {
+	if !ok {
+		DPrintf("[%d] failed to send AppendEntries to %d at term: %d, currentTerm: %d", rf.me, peerIdx, args.Term, rf.currentTerm)
+		return
+	}
+	DPrintf("[%d] received AppendEntries reply from %d, ok: %t, term: %d, entries I sent before: %v", rf.me, peerIdx, ok, reply.Term, entriesToSend)
+	if reply.Term > rf.currentTerm {
+		rf.convertToFollower(reply.Term)
 		return
 	}
 	// Handle stale heartbeats
@@ -607,6 +614,7 @@ func (rf *Raft) logApplier(ch chan raftapi.ApplyMsg) {
 			rf.lastApplied++
 		}
 		rf.mu.Unlock()
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
