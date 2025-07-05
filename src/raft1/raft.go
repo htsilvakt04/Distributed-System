@@ -7,6 +7,8 @@ package raft
 // Make() creates a new raft peer that implements the raft interface.
 
 import (
+	"6.5840/labgob"
+	"bytes"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -107,14 +109,25 @@ func (rf *Raft) getFirstLogEntry() *raftapi.LogEntry {
 // after you've implemented snapshots, pass the current snapshot
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
-	// Your code here (3C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
+	buff := new(bytes.Buffer)
+	encoder := labgob.NewEncoder(buff)
+	err := encoder.Encode(rf.currentTerm)
+	if err != nil {
+		DPrintf("Persist Error: %v\n", err)
+		return
+	}
+	err = encoder.Encode(rf.votedFor)
+	if err != nil {
+		DPrintf("Persist Error: %v\n", err)
+		return
+	}
+	err = encoder.Encode(rf.logs)
+	if err != nil {
+		DPrintf("Persist Error: %v\n", err)
+		return
+	}
+	raftState := buff.Bytes()
+	rf.persister.Save(raftState, nil)
 }
 
 // restore previously persisted state.
@@ -122,19 +135,39 @@ func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
-	// Your code here (3C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	buff := bytes.NewBuffer(data)
+	decoder := labgob.NewDecoder(buff)
+
+	var currentTerm int
+	var votedFor int
+	logs := make([]*raftapi.LogEntry, 0)
+
+	if err := decoder.Decode(&currentTerm); err != nil {
+		DPrintf("ReadPersist Error: %v\n", err)
+		return
+	}
+	if err := decoder.Decode(&votedFor); err != nil {
+		DPrintf("ReadPersist Error: %v\n", err)
+		return
+	}
+	if err := decoder.Decode(&logs); err != nil {
+		DPrintf("ReadPersist Error: %v\n", err)
+		return
+	}
+
+	// Initialize the Raft instance with the restored state
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.SetCurrentTerm(currentTerm)
+	rf.SetVotedFor(votedFor)
+	rf.logs = make([]*raftapi.LogEntry, len(logs))
+	for i, log := range logs {
+		rf.logs[i] = &raftapi.LogEntry{
+			Term:    log.Term,
+			Index:   log.Index,
+			Command: log.Command,
+		}
+	}
 }
 
 // how many bytes in Raft's persisted log?
@@ -183,6 +216,9 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
+	XTerm   int // term of the conflicting entry
+	XIndex  int // index of the log entry that caused the conflict
+	XLen    int // length of the log at the follower, used to update the follower's log
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -215,7 +251,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Index:   lastRaftLogEntry.Index + 1,
 		Command: command,
 	})
-	// persist the state: todo
+	rf.persist()
 	return rf.getLastLogEntry().Index, rf.currentTerm, isLeader
 }
 
@@ -263,6 +299,7 @@ func (rf *Raft) attemptElection() {
 	lastTerm := rf.currentTerm
 	rf.state = StateCandidate
 	rf.votedFor = rf.me
+	rf.persist()
 	rf.mu.Unlock()
 	votes := 1
 	done := false
@@ -300,6 +337,7 @@ func (rf *Raft) attemptElection() {
 			// convert to follow if cond meet
 			if reply.Term > rf.currentTerm {
 				rf.convertToFollower(reply.Term)
+				rf.persist()
 				done = true
 				return
 			}
@@ -340,8 +378,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Term = max(args.Term, rf.currentTerm)
 	reply.VoteGranted = false
 	raftLastLogEntry := rf.getLastLogEntry()
+	persist := false
 	if args.Term > rf.currentTerm {
 		rf.convertToFollower(args.Term)
+		persist = true
 	}
 
 	if args.Term < rf.currentTerm {
@@ -356,7 +396,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	} else {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
+		persist = true
 		DPrintf("[%d] grant vote for %d, currentTerm: %d", rf.me, args.CandidateId, rf.currentTerm)
+	}
+
+	if persist {
+		rf.persist()
+		DPrintf("[%d] persist state after RequestVote from %d, currentTerm: %d, votedFor: %d", rf.me, args.CandidateId, rf.currentTerm, rf.votedFor)
 	}
 }
 
@@ -373,6 +419,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.mu.Unlock()
 	if args.Term > rf.currentTerm || (args.LeaderCommit > rf.commitIndex && rf.state != StateFollower) {
 		rf.convertToFollower(args.Term)
+		rf.persist()
 	}
 
 	reply.Term = rf.currentTerm
@@ -388,13 +435,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.PrevLogIndex >= len(rf.logs) {
 		DPrintf("[%d] reject AppendEntries from %d, PrevLogIndex %d is out of range", rf.me, args.LeaderId, args.PrevLogIndex)
 		reply.Success = false
+		reply.XLen = len(rf.logs)
 		return
 	}
 	// Check if term at PrevLogIndex matches
 	if rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
 		DPrintf("[%d] reject AppendEntries from %d, PrevLogTerm %d does not match log entry at PrevLogIndex %d with term %d",
 			rf.me, args.LeaderId, args.PrevLogTerm, args.PrevLogIndex, rf.logs[args.PrevLogIndex].Term)
+		// Find the first log entry that has same term as PrevLogTerm
+		entry := findFirstEntryHasSameTerm(args.PrevLogIndex, rf)
 		reply.Success = false
+		reply.XIndex = entry.Index
+		reply.XTerm = entry.Term
 		return
 	}
 
@@ -409,6 +461,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	for i, entry := range rf.logs {
 		DPrintf("[%d] log[%d] = %+v", rf.me, i, *entry)
 	}
+	persist := false
 	for _, entry := range args.Entries {
 		// If the entry already exists, we only update it if the term is different\
 		if entry.Index <= rf.getLastLogEntry().Index {
@@ -416,13 +469,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				DPrintf("[%d] conflict detected at index %d, truncate log and append new entry", rf.me, entry.Index)
 				rf.logs = rf.logs[:entry.Index] // truncate the log at the entry index
 				rf.logs = append(rf.logs, &entry)
+				persist = true
 			}
 		} else {
 			// If the entry does not exist, we append it to the log
 			rf.logs = append(rf.logs, &entry)
+			persist = true
 		}
 	}
 
+	if persist {
+		rf.persist()
+	}
 	DPrintf("[%d] logs after AppendEntries", rf.me)
 	for i, entry := range rf.logs {
 		DPrintf("[%d] log[%d] = %+v", rf.me, i, *entry)
@@ -433,6 +491,31 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	reply.Success = true
 	return
+}
+
+func findFirstEntryHasSameTerm(fromIdx int, rf *Raft) *raftapi.LogEntry {
+	term := rf.logs[fromIdx].Term
+	var entry *raftapi.LogEntry
+	for i := fromIdx; i > 0; i-- {
+		if rf.logs[i].Term != term {
+			break
+		} else {
+			entry = rf.logs[i]
+		}
+	}
+	return entry
+}
+func findLastEntryHasSameTerm(term int, rf *Raft) *raftapi.LogEntry {
+	var entry *raftapi.LogEntry
+	// Find the last log entry that has the same term as reply.XTerm
+	for i := len(rf.logs) - 1; i > 0 && rf.logs[i].Term >= term; i-- {
+		if rf.logs[i].Term == term {
+			entry = rf.logs[i]
+			DPrintf("[%d] found log entry with same term %d at index %d", rf.me, term, entry.Index)
+			break
+		}
+	}
+	return entry
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -525,6 +608,7 @@ func (rf *Raft) heartBeat(peerIdx int) {
 	DPrintf("[%d] received AppendEntries reply from %d, ok: %t, term: %d, entries I sent before: %v", rf.me, peerIdx, ok, reply.Term, entriesToSend)
 	if reply.Term > rf.currentTerm {
 		rf.convertToFollower(reply.Term)
+		rf.persist()
 		return
 	}
 	// Handle stale heartbeats
@@ -541,8 +625,17 @@ func (rf *Raft) heartBeat(peerIdx int) {
 			DPrintf("[%d] AppendEntries to %d succeeded, updated nextIndex: %d, matchIndex: %d", rf.me, peerIdx, rf.nextIndex[peerIdx], rf.matchIndex[peerIdx])
 		}
 	} else {
-		// guard against the case where the nextIndex is already at 1
-		rf.nextIndex[peerIdx] = max(1, rf.nextIndex[peerIdx]-1)
+		// handle logs backtracking
+		if reply.XLen != 0 {
+			rf.nextIndex[peerIdx] = reply.XLen
+		} else if reply.XTerm != 0 && reply.XIndex != 0 {
+			entry := findLastEntryHasSameTerm(reply.XTerm, rf)
+			if entry != nil {
+				rf.nextIndex[peerIdx] = entry.Index + 1
+			} else {
+				rf.nextIndex[peerIdx] = reply.XIndex
+			}
+		}
 	}
 }
 
@@ -561,7 +654,7 @@ func (rf *Raft) initMatchIndex() {
 /*
 Used by the leader to commit its logs in the background
 */
-func (rf *Raft) committer() {
+func (rf *Raft) logCommitter() {
 	for !rf.killed() {
 		rf.mu.Lock()
 		if !rf.GetIsLeader() {
@@ -601,13 +694,16 @@ func (rf *Raft) logApplier(ch chan raftapi.ApplyMsg) {
 	for !rf.killed() {
 		rf.mu.Lock()
 		for rf.commitIndex > rf.lastApplied {
-			rf.mu.Unlock()
 			applyIdx := rf.lastApplied + 1
+			applyCmd := rf.logs[applyIdx].Command
+			rf.mu.Unlock()
+
 			ch <- raftapi.ApplyMsg{
 				CommandValid: true,
-				Command:      rf.logs[applyIdx].Command,
+				Command:      applyCmd,
 				CommandIndex: applyIdx,
 			}
+
 			rf.mu.Lock()
 			DPrintf("[%d] applied log entry at index %d, command: %v", rf.me, applyIdx, rf.logs[applyIdx].Command)
 			DPrintf("[%d] commitIndex: %d, lastApplied: %d", rf.me, rf.commitIndex, applyIdx)
@@ -635,7 +731,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// start ticker goroutine to start elections
 	go rf.ticker()
 	// start the log committer goroutine
-	go rf.committer()
+	go rf.logCommitter()
 	// start the apply logs goroutine
 	go rf.logApplier(applyCh)
 	return rf
