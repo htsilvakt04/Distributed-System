@@ -71,9 +71,10 @@ type RequestVoteReply struct {
 		- voteGranted: whether the follower granted the vote for this candidate
 	*/
 
-	Term         int
-	VoteGranted  bool
-	RejectReason string // optional, used for debugging
+	Term                 int
+	VoteGranted          bool
+	RejectReason         string // optional, used for debugging
+	LatestCommittedIndex int    // index of the latest committed log entry in the follower's log
 }
 type AppendEntriesArgs struct {
 	Term         int
@@ -90,4 +91,15 @@ type AppendEntriesReply struct {
 	XTerm   int // term of the conflicting entry
 	XIndex  int // index of the log entry that caused the conflict
 	XLen    int // length of the log at the follower, used to update the follower's log
+}
+
+type InstallSnapshotRPCArgs struct {
+	Term              int
+	LeaderId          int
+	LastIncludedIndex int
+	LastIncludedTerm  int
+	Data              []byte // snapshot data
+}
+type InstallSnapshotRPCReply struct {
+	Term int // current term of the follower
 }
