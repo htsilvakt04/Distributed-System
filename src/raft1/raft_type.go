@@ -46,9 +46,12 @@ type Raft struct {
 	matchIndex []int // for each server, index of highest log entry known to be replicated on that server
 }
 type EncodedRaftState struct {
-	CurrentTerm int
-	VotedFor    int
-	Logs        []raftapi.LogEntry
+	CurrentTerm       int
+	VotedFor          int
+	Logs              []raftapi.LogEntry
+	BaseIndex         int
+	LastIncludedIndex int
+	LastIncludedTerm  int
 }
 
 type EncodedSnapshot struct {

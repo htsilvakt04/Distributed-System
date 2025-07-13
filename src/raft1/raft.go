@@ -9,6 +9,7 @@ package raft
 import (
 	"6.5840/labgob"
 	"bytes"
+	"fmt"
 	"math/rand"
 	"sync/atomic"
 	"time"
@@ -68,8 +69,28 @@ func (rf *Raft) getLastLogEntry() *raftapi.LogEntry {
 
 	return rf.logs[len(rf.logs)-1]
 }
+
 func (rf *Raft) getFirstLogEntry() *raftapi.LogEntry {
 	return rf.logs[0]
+}
+
+func (rf *Raft) getLogEntryAt(idx int) *raftapi.LogEntry {
+	if idx < rf.baseIndex || idx > rf.baseIndex+len(rf.logs) {
+		DPrintf("[%d] getLogEntryAt(%d) out of range, baseIndex: %d, logs length: %d", rf.me, idx, rf.baseIndex, len(rf.logs))
+		return nil
+	}
+	if idx == rf.baseIndex+len(rf.logs) {
+		if len(rf.logs) == 0 {
+			// If the log is empty, return the last included log entry
+			return &raftapi.LogEntry{
+				Term:  rf.lastIncludedTerm,
+				Index: rf.lastIncludedIndex,
+			}
+		} else {
+			return nil
+		}
+	}
+	return rf.logs[idx-rf.baseIndex]
 }
 
 // save Raft's persistent state to stable storage,
@@ -87,38 +108,24 @@ func (rf *Raft) persist(snapshot []byte) {
 	rf.persister.Save(raftState, snapshot)
 }
 
-func createEncodedSnapShot(term int, index int, data []byte) []byte {
-	snapshot := &EncodedSnapshot{
-		LastIncludedIndex: index,
-		LastIncludedTerm:  term,
-		Data:              data,
-	}
-	buff := new(bytes.Buffer)
-	encoder := labgob.NewEncoder(buff)
-	err := encoder.Encode(snapshot)
-	if err != nil {
-		DPrintf("Snapshot Encode Error: %v\n", err)
-		return nil
-	}
-
-	return buff.Bytes()
-}
-
 func (rf *Raft) createEncodedRaftState() []byte {
 	logs := make([]raftapi.LogEntry, len(rf.logs))
 	for i, log := range rf.logs {
 		logs[i] = *log
 	}
 	raftState := EncodedRaftState{
-		CurrentTerm: rf.currentTerm,
-		VotedFor:    rf.votedFor,
-		Logs:        logs,
+		CurrentTerm:       rf.currentTerm,
+		VotedFor:          rf.votedFor,
+		Logs:              logs,
+		BaseIndex:         rf.baseIndex,
+		LastIncludedIndex: rf.lastIncludedIndex,
+		LastIncludedTerm:  rf.lastIncludedTerm,
 	}
 	buff := new(bytes.Buffer)
 	encoder := labgob.NewEncoder(buff)
 	err := encoder.Encode(raftState)
 	if err != nil {
-		DPrintf("Encode Error: %v\n", err)
+		panic("Encode Error")
 		return nil
 	}
 	return buff.Bytes()
@@ -142,11 +149,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 		DPrintf("[%d] Snapshot index %d is out of range, baseIndex: %d, logs length: %d", rf.me, index, rf.baseIndex, len(rf.logs))
 		return
 	}
-	lastIncludedTerm := rf.logs[index-rf.baseIndex].Term
-	snapShotState := createEncodedSnapShot(lastIncludedTerm, index, snapshot)
-	if snapShotState == nil {
-		panic("snapshot state is nil")
-	}
+	lastIncludedTerm := rf.currentTerm
 	// truncate the log up to the snapshot index
 	logs := make([]*raftapi.LogEntry, 0)
 	for i := index - rf.baseIndex + 1; i < len(rf.logs); i++ {
@@ -156,8 +159,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.baseIndex = index + 1
 	rf.lastIncludedTerm = lastIncludedTerm
 	rf.lastIncludedIndex = index
-	rf.persist(snapShotState)
-
+	rf.persist(snapshot)
 	DPrintf("[%d] Snapshot created at index %d, lastIncludedTerm: %d, baseIndex: %d, logs length: %d", rf.me, index, lastIncludedTerm, rf.baseIndex, len(rf.logs))
 	DPrintf("[%d] logs after Snapshot", rf.me)
 	for i, entry := range rf.logs {
@@ -347,7 +349,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	} else if rf.votedFor != -1 && rf.votedFor != args.CandidateId {
 		DPrintf("[%d] reject vote for %d, already voted for %d", rf.me, args.CandidateId, rf.votedFor)
 		reply.RejectReason = "already voted for: " + string(rune(rf.votedFor))
-	} else if !upToDateLog(args, raftLastLogEntry) {
+	} else if !IsSenderLogUpToDate(args, raftLastLogEntry) {
 		DPrintf("[%d] reject vote for %d, its log is more up-to-date", rf.me, args.CandidateId)
 		reply.RejectReason = "candidate's log is not up-to-date"
 	} else {
@@ -363,7 +365,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 }
 
-func upToDateLog(args *RequestVoteArgs, raftLastLogEntry *raftapi.LogEntry) bool {
+func IsSenderLogUpToDate(args *RequestVoteArgs, raftLastLogEntry *raftapi.LogEntry) bool {
 	return !(args.LastLogTerm < raftLastLogEntry.Term || (args.LastLogTerm == raftLastLogEntry.Term && args.LastLogIndex < raftLastLogEntry.Index))
 }
 
@@ -415,9 +417,8 @@ func (rf *Raft) InstallSnapshotRPC(args *InstallSnapshotRPCArgs, reply *InstallS
 		DPrintf("[%d] reject InstallSnapshotRPC from %d, baseIndex %d is greater than LastIncludedIndex %d", rf.me, args.LeaderId, rf.baseIndex, args.LastIncludedIndex)
 		return
 	}
-	snapshot := createEncodedSnapShot(args.LastIncludedTerm, args.LastIncludedIndex, args.Data)
 	// save the snapshot
-	rf.persist(snapshot)
+	rf.persist(args.Data)
 	rf.lastIncludedTerm = args.LastIncludedTerm
 	rf.lastIncludedIndex = args.LastIncludedIndex
 
@@ -456,15 +457,15 @@ func (rf *Raft) InstallSnapshotRPC(args *InstallSnapshotRPCArgs, reply *InstallS
 
 func (rf *Raft) sendInstallSnapshotRPC(peerIdx int) {
 	rf.mu.Lock()
+	DPrintf("[%d] send sendInstallSnapshotRPC() for peer %d, baseIndex: %d, nextIndex: %d", rf.me, peerIdx, rf.baseIndex, rf.nextIndex[peerIdx])
 	args := &InstallSnapshotRPCArgs{
 		Term:              rf.currentTerm,
 		LeaderId:          rf.me,
 		LastIncludedIndex: rf.lastIncludedIndex,
 		LastIncludedTerm:  rf.lastIncludedTerm,
-		Data:              rf.getPersistedSnapshot(rf.persister.ReadSnapshot()).Data,
+		Data:              rf.persister.ReadSnapshot(),
 	}
 	reply := &InstallSnapshotRPCReply{}
-	DPrintf("[%d] send sendInstallSnapshotRPC() for peer %d, baseIndex: %d, nextIndex: %d", rf.me, peerIdx, rf.baseIndex, rf.nextIndex[peerIdx])
 	rf.mu.Unlock()
 	ok := rf.peers[peerIdx].Call("Raft.InstallSnapshotRPC", args, reply)
 	rf.mu.Lock()
@@ -484,18 +485,20 @@ func (rf *Raft) sendInstallSnapshotRPC(peerIdx int) {
 	rf.matchIndex[peerIdx] = max(rf.lastIncludedIndex, rf.matchIndex[peerIdx])
 }
 
-func (rf *Raft) getPersistedSnapshot(snapshot []byte) *EncodedSnapshot {
-	if snapshot == nil || len(snapshot) < 1 { // bootstrap without any state?
+func (rf *Raft) getPersistedSnapshotData(data []byte) []byte {
+	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return nil
 	}
-	buff := bytes.NewBuffer(snapshot)
+	buff := bytes.NewBuffer(data)
 	decoder := labgob.NewDecoder(buff)
-	var snap EncodedSnapshot
-	if err := decoder.Decode(&snap); err != nil {
-		DPrintf("ReadSnapshot Error: %v\n", err)
+
+	var snapshot EncodedSnapshot
+	if err := decoder.Decode(&snapshot); err != nil {
+		panic(fmt.Sprintf("Decode Snapshot Error: %v", err))
 		return nil
 	}
-	return &snap
+
+	return snapshot.Data
 }
 
 func checkLogsCond(args *AppendEntriesArgs, reply *AppendEntriesReply, rf *Raft) bool {
@@ -573,15 +576,9 @@ func appendNewEntriesToLogs(args *AppendEntriesArgs, rf *Raft) {
 }
 
 func findFirstEntryHasSameTerm(fromIdx int, rf *Raft) *raftapi.LogEntry {
-	if len(rf.logs) == 0 {
-		return &raftapi.LogEntry{
-			Term:  rf.lastIncludedTerm,
-			Index: rf.lastIncludedIndex,
-		}
-	}
 	term := rf.logs[fromIdx].Term
 	var entry *raftapi.LogEntry
-	for i := fromIdx; i > 0; i-- {
+	for i := fromIdx; i >= 0; i-- {
 		if rf.logs[i].Term != term {
 			break
 		} else {
@@ -675,7 +672,7 @@ func (rf *Raft) heartBeat(peerIdx int) {
 		return
 	}
 
-	prevSentIdx, prevSendTerm := getPrevSentEntry(peerIdx, rf)
+	prevSentIdx, prevSendTerm := rf.getPeerPrevSentEntry(peerIdx)
 	DPrintf("[%d] send heartBeat to %d and nextIndex is %d, prevSentIdx: %d, baseIdx: %d, LeaderCommit: %d", rf.me, peerIdx, rf.nextIndex[peerIdx], prevSentIdx, rf.baseIndex, rf.commitIndex)
 	lastNextIdx := prevSentIdx + 1
 	entriesToSend := rf.getPeerNextLogEntries(peerIdx)
@@ -738,7 +735,7 @@ func (rf *Raft) heartBeat(peerIdx int) {
 	}
 }
 
-func getPrevSentEntry(peerIdx int, rf *Raft) (int, int) {
+func (rf *Raft) getPeerPrevSentEntry(peerIdx int) (int, int) {
 	// If nextIndex is equal to baseIndex, it means we have no logs to send
 	if rf.nextIndex[peerIdx] == rf.baseIndex {
 		prevSentIdx := rf.baseIndex - 1
@@ -746,8 +743,11 @@ func getPrevSentEntry(peerIdx int, rf *Raft) (int, int) {
 		return prevSentIdx, prevSendTerm
 	} else {
 		prevSentIdx := rf.nextIndex[peerIdx] - 1
-		prevSendTerm := rf.logs[prevSentIdx-rf.baseIndex].Term
-		return prevSentIdx, prevSendTerm
+		entry := rf.getLogEntryAt(prevSentIdx)
+		if entry == nil {
+			panic("getPeerPrevSentEntry: entry is nil, this should not happen")
+		}
+		return prevSentIdx, entry.Term
 	}
 }
 
@@ -802,22 +802,17 @@ func (rf *Raft) logCommitter() {
 /*
 Used for both leader and followers to apply the logs to its application StateMachine
 */
-func (rf *Raft) logApplier(ch chan raftapi.ApplyMsg) {
+func (rf *Raft) logApplier() {
 	for !rf.killed() {
 		rf.mu.Lock()
 		for rf.commitIndex > rf.lastApplied {
 			DPrintf("[%d] logApplier info lastApplied: %d, commitIndex: %d, baseIndex: %d, logs length: %d", rf.me, rf.lastApplied, rf.commitIndex, rf.baseIndex, len(rf.logs))
-			// todo: remove this check after debugging
-			if rf.lastApplied+1-rf.baseIndex < 0 || rf.lastApplied+1-rf.baseIndex >= len(rf.logs) {
-				DPrintf("[%d] logApplier out of range, lastApplied: %d, baseIndex: %d, logs length: %d", rf.me, rf.lastApplied, rf.baseIndex, len(rf.logs))
-				break
-			}
 			entry := rf.logs[rf.lastApplied+1-rf.baseIndex]
 			applyIdx := entry.Index
 			applyCmd := entry.Command
 			rf.mu.Unlock()
 
-			ch <- raftapi.ApplyMsg{
+			rf.applyCh <- raftapi.ApplyMsg{
 				CommandValid: true,
 				Command:      applyCmd,
 				CommandIndex: applyIdx,
@@ -847,8 +842,14 @@ func (rf *Raft) recoverFromEncodedRaftState(data []byte) {
 	// Initialize the Raft instance with the restored state
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	DPrintf("[%d] recoverFromEncodedRaftState raftState: %v", rf.me, raftState)
 	rf.SetCurrentTerm(raftState.CurrentTerm)
 	rf.SetVotedFor(raftState.VotedFor)
+	rf.baseIndex = raftState.BaseIndex
+	rf.lastIncludedIndex = raftState.LastIncludedIndex
+	rf.lastIncludedTerm = raftState.LastIncludedTerm
+	rf.commitIndex = raftState.LastIncludedIndex
+	rf.lastApplied = raftState.LastIncludedIndex
 	rf.logs = make([]*raftapi.LogEntry, len(raftState.Logs))
 	for i, log := range raftState.Logs {
 		rf.logs[i] = &raftapi.LogEntry{
@@ -866,25 +867,29 @@ func (rf *Raft) recoverFromEncodedSnapshot(data []byte) {
 	buff := bytes.NewBuffer(data)
 	decoder := labgob.NewDecoder(buff)
 
-	var snapshot EncodedSnapshot
-	if err := decoder.Decode(&snapshot); err != nil {
-		DPrintf("recoverFromEncodedSnapshot Error: %v\n", err)
+	var idx int
+	if err := decoder.Decode(&idx); err != nil {
+		panic(fmt.Sprintf("[%d] recoverFromEncodedSnapshot Error: %v", rf.me, err))
 		return
 	}
+
 	rf.mu.Lock()
-	// Initialize the Raft instance with the restored snapshot
-	rf.lastIncludedIndex = snapshot.LastIncludedIndex
-	rf.lastIncludedTerm = snapshot.LastIncludedTerm
-	rf.baseIndex = snapshot.LastIncludedIndex + 1
-	DPrintf("[%d] recovered from snapshot, lastIncludedIndex: %d, lastIncludedTerm: %d, baseIndex: %d", rf.me, rf.lastIncludedIndex, rf.lastIncludedTerm, rf.baseIndex)
-	rf.mu.Unlock()
-	// send to application state machine
-	rf.applyCh <- raftapi.ApplyMsg{
-		SnapshotValid: true,
-		Snapshot:      snapshot.Data,
-		SnapshotIndex: snapshot.LastIncludedIndex,
-		SnapshotTerm:  snapshot.LastIncludedTerm,
+	defer rf.mu.Unlock()
+	if rf.lastIncludedIndex > idx {
+		DPrintf("[%d] baseIndex %d is greater than or equal to lastIncludedIndex %d, no need to recover", rf.me, rf.baseIndex, idx)
+		return
 	}
+	//me := rf.me
+	DPrintf("[%d] finished recovering from snapshot, lastIncludedIndex: %d, baseIndex: %d", rf.me, rf.lastIncludedIndex, rf.baseIndex)
+	// send the snapshot to the application layer
+	//applyMsg := raftapi.ApplyMsg{
+	//	Snapshot:      data,
+	//	SnapshotValid: true,
+	//	SnapshotIndex: rf.lastIncludedIndex,
+	//	SnapshotTerm:  rf.lastIncludedTerm,
+	//}
+	//rf.applyCh <- applyMsg
+	//DPrintf("[%d] after sending snapshot to application layer, lastIncludedIndex: %d, lastIncludedTerm: %d", rf.me, rf.lastIncludedIndex, rf.lastIncludedTerm)
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -907,7 +912,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// start the log committer goroutine
 	go rf.logCommitter()
 	// start the apply logs goroutine
-	go rf.logApplier(applyCh)
+	go rf.logApplier()
 	return rf
 }
 
