@@ -2,6 +2,7 @@
 
 - [Lab01: Distributed MapReduce in Go](#lab01-distributed-mapreduce-in-go)
 - [Lab02: Key/Value Server and Distributed Lock](#lab02-keyvalue-server-and-distributed-lock)
+- [Lab03: Replicated State Machine with Raft](#lab03-replicated-state-machine-with-raft-mit-65840)
 
 ---
 
@@ -84,3 +85,62 @@ The final server is robust to dropped, delayed, or re-ordered network messages, 
 
 ## Testing
 ![Lab02 result](images/Lab02.png)
+
+---
+# Lab03: Replicated State Machine with Raft
+
+## Overview
+
+This project implements Raft, a fault-tolerant replicated state machine protocol, in Go.
+
+Raft ensures consistency across multiple servers by replicating a log of client commands. Even in the presence of crashes or network partitions, a majority of servers can continue making progress and maintain a coherent service state.
+
+## Features Implemented
+
+- Leader election with randomized timeouts
+- Log replication and consistency
+- Crash recovery via persistent state
+- Log compaction through snapshotting
+- Correct operation despite network partitions and reordering
+
+This implementation closely follows the *extended Raft paper*, with particular attention to Figure 2, and serves as a solid foundation for building higher-level distributed services.
+
+
+## File Layout
+
+- [`src/`](src/)
+    - [`raft1/`](src/raft1/)
+        - [`raft.go`](src/raft1/raft.go) – Raft implementation
+        - [`persister.go`](src/raft1/persister.go) – Persistent state abstraction
+
+
+## Development Notes
+
+This lab was completed in four parts, each adding essential features:
+
+### Part 3A: Leader Election
+- Randomized timeouts to trigger elections
+- RequestVote RPCs
+- AppendEntries RPCs as heartbeats
+- Ensures a single leader exists and recovers leadership after failures
+
+### Part 3B: Log Replication
+- Client commands added to the replicated log
+- AppendEntries RPCs carry new log entries
+- Correct handling of log consistency and conflicts
+- Commit index tracking and ApplyMsg delivery
+
+### Part 3C: Persistence
+- Persistent storage of Raft state (term, vote, log)
+- Crash/restart recovery via serialization with labgob
+- Integration with Persister abstraction
+
+### Part 3D: Log Compaction (Snapshotting)
+- Service-layer snapshot support via `Snapshot()`
+- Log truncation before snapshot index
+- InstallSnapshot RPC to synchronize lagging peers
+- Persistent storage of both Raft state and snapshot data
+
+## Testing
+
+![Lab03 Result](images/Lab03.png)
