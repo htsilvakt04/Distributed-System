@@ -223,7 +223,6 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-// Your code here (3A)
 func (rf *Raft) ticker() {
 	for !rf.killed() {
 		start := time.Now()
