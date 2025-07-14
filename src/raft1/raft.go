@@ -258,63 +258,7 @@ func (rf *Raft) attemptElection() {
 		if peerIdx == rf.me {
 			continue
 		}
-		rf.mu.Lock()
-		lastLogEntry := rf.getLastLogEntry()
-		args := &RequestVoteArgs{
-			Term:         rf.currentTerm,
-			LastLogIndex: lastLogEntry.Index,
-			LastLogTerm:  lastLogEntry.Term,
-			CandidateId:  rf.me,
-		}
-		reply := &RequestVoteReply{}
-		rf.mu.Unlock()
-
-		go func() {
-			rf.mu.Lock()
-			DPrintf("[%d] sendRequestVote to %d, currentTerm: %d ,args: %+v", rf.me, peerIdx, rf.currentTerm, args)
-			rf.mu.Unlock()
-			ok := rf.sendRequestVote(peerIdx, args, reply)
-			rf.mu.Lock()
-			defer rf.mu.Unlock()
-			if !ok {
-				DPrintf("[%d] failed to send RequestVote to %d at term: %d, currentTerm: %d", rf.me, peerIdx, args.Term, rf.currentTerm)
-				return
-			}
-
-			DPrintf("[%d] sendRequestVote reply from %d, reply term: %d, current Term: %d, voteGranted: %t, reject reson: %s", rf.me, peerIdx, reply.Term, rf.currentTerm, reply.VoteGranted, reply.RejectReason)
-			if rf.killed() || done || rf.currentTerm != lastTerm || rf.state == StateFollower {
-				DPrintf("[%d] election stopped, either killed or state changed to follower or already done", rf.me)
-				return
-			}
-
-			// convert to follow if cond meet
-			if reply.Term > rf.currentTerm {
-				rf.convertToFollower(reply.Term)
-				rf.persist(nil)
-				done = true
-				return
-			}
-
-			if reply.VoteGranted {
-				votes++
-			}
-
-			// tally the votes
-			if winElection := votes > len(rf.peers)/2; winElection {
-				DPrintf("[%d] won election, votes: %d, currentTerm: %d, current CommitIdx: %d", rf.me, votes, rf.currentTerm, rf.commitIndex)
-				// print logs for debugging
-				DPrintf("[%d] logs after winning election", rf.me)
-				for i, entry := range rf.logs {
-					DPrintf("[%d] log[%d] = %+v", rf.me, i, *entry)
-				}
-				done = true
-				rf.SetState(StateLeader)
-				rf.initNextIndex()
-				rf.initMatchIndex()
-
-				go rf.heartBeats()
-			}
-		}()
+		go rf.handleSendRequestVote(peerIdx, &done, lastTerm, &votes)
 	}
 	DPrintf("[%d] waiting for election to complete", rf.me)
 	rf.mu.Lock()
