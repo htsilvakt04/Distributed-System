@@ -2,7 +2,7 @@
 
 - [Lab01: Distributed MapReduce in Go](#lab01-distributed-mapreduce-in-go)
 - [Lab02: Key/Value Server and Distributed Lock](#lab02-keyvalue-server-and-distributed-lock)
-- [Lab03: Replicated State Machine with Raft](#lab03-replicated-state-machine-with-raft-mit-65840)
+- [Lab03: Replicated State Machine with Raft](#lab03-replicated-state-machine-with-raft)
 
 ---
 
