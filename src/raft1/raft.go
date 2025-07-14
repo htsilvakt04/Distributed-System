@@ -13,7 +13,6 @@ import (
 	"math/rand"
 	"sync/atomic"
 	"time"
-
 	//	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raftapi"
@@ -230,7 +229,7 @@ func (rf *Raft) ticker() {
 	for !rf.killed() {
 		start := time.Now()
 		// pause for a random amount of time between 300 and 600 milliseconds
-		ms := 300 + (rand.Int63() % 300)
+		ms := rf.GetElectionTimeout().Milliseconds() + (rand.Int63() % 300)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 		rf.mu.Lock()
 		// Check if a leader election should be started.
@@ -358,7 +357,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		persist = true
 		DPrintf("[%d] grant vote for %d, currentTerm: %d", rf.me, args.CandidateId, rf.currentTerm)
 	}
-
 	if persist {
 		rf.persist(nil)
 		DPrintf("[%d] persist state after RequestVote from %d, currentTerm: %d, votedFor: %d", rf.me, args.CandidateId, rf.currentTerm, rf.votedFor)
@@ -376,7 +374,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	DPrintf("[%d] received AppendEntries from %d, term: %d, currentTerm: %d, entries %v, PrevLogIndex: %d, LeaderCommit: %d, current commitIndex:%d, is am I leader? %t",
 		rf.me, args.LeaderId, args.Term, rf.currentTerm, args.Entries, args.PrevLogIndex, args.LeaderCommit, rf.commitIndex, rf.GetIsLeader(),
 	)
-	//if args.Term > rf.currentTerm || (args.LeaderCommit > rf.commitIndex && rf.state != StateFollower) {
 	if args.Term > rf.currentTerm {
 		rf.convertToFollower(args.Term)
 		rf.persist(nil)
@@ -671,10 +668,26 @@ func (rf *Raft) heartBeat(peerIdx int) {
 		rf.sendInstallSnapshotRPC(peerIdx)
 		return
 	}
+	args, reply, lastNextIdx := rf.computeHeartbeatArgs(peerIdx)
+	rf.mu.Unlock()
+	// Send the AppendEntries RPC to the peer
+	ok := rf.peers[peerIdx].Call("Raft.AppendEntries", args, reply)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if !ok {
+		DPrintf("[%d] failed to send AppendEntries to %d at term: %d, currentTerm: %d", rf.me, peerIdx, args.Term, rf.currentTerm)
+		return
+	}
 
+	if !rf.handleAppendEntriesReply(peerIdx, lastNextIdx, args, reply) {
+		return
+	}
+}
+
+func (rf *Raft) computeHeartbeatArgs(peerIdx int) (*AppendEntriesArgs, *AppendEntriesReply, int) {
 	prevSentIdx, prevSendTerm := rf.getPeerPrevSentEntry(peerIdx)
 	DPrintf("[%d] send heartBeat to %d and nextIndex is %d, prevSentIdx: %d, baseIdx: %d, LeaderCommit: %d", rf.me, peerIdx, rf.nextIndex[peerIdx], prevSentIdx, rf.baseIndex, rf.commitIndex)
-	lastNextIdx := prevSentIdx + 1
+
 	entriesToSend := rf.getPeerNextLogEntries(peerIdx)
 	// print sent entries for debugging
 	DPrintf("[%d] entries to send to %d:", rf.me, peerIdx)
@@ -689,50 +702,9 @@ func (rf *Raft) heartBeat(peerIdx int) {
 		LeaderCommit: rf.commitIndex,
 	}
 	reply := &AppendEntriesReply{}
-	rf.mu.Unlock()
-	// Send the AppendEntries RPC to the peer
-	ok := rf.peers[peerIdx].Call("Raft.AppendEntries", args, reply)
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	if !ok {
-		DPrintf("[%d] failed to send AppendEntries to %d at term: %d, currentTerm: %d", rf.me, peerIdx, args.Term, rf.currentTerm)
-		return
-	}
-	DPrintf("[%d] received AppendEntries reply from %d, ok: %t, reply's term: %d, my current term: %d, entries I sent before: %v",
-		rf.me, peerIdx, reply.Success, reply.Term, rf.currentTerm, entriesToSend)
-	if reply.Term > rf.currentTerm {
-		rf.convertToFollower(reply.Term)
-		rf.persist(nil)
-		return
-	}
-	// Handle stale heartbeats
-	if lastNextIdx != rf.nextIndex[peerIdx] {
-		DPrintf("[%d] stale heartbeat reply from %d ignored (nextIndex %d != lastNextIdx %d)", rf.me, peerIdx, rf.nextIndex[peerIdx], lastNextIdx)
-		return
-	}
-	// If the AppendEntries RPC was successful, update the nextIndex and matchIndex for the peer
-	if reply.Success {
-		if len(entriesToSend) > 0 {
-			lastSentIdx := args.PrevLogIndex + len(entriesToSend)
-			rf.matchIndex[peerIdx] = lastSentIdx
-			rf.nextIndex[peerIdx] = lastSentIdx + 1
-		}
+	lastNextIdx := prevSentIdx + 1
 
-		DPrintf("[%d] AppendEntries to %d succeeded, updated nextIndex: %d, matchIndex: %d, current commitIdx: %d", rf.me, peerIdx, rf.nextIndex[peerIdx], rf.matchIndex[peerIdx], rf.commitIndex)
-	} else {
-		DPrintf("[%d] AppendEntries to %d failed, reply: %+v, current commit idx: %d", rf.me, peerIdx, reply, rf.commitIndex)
-		// handle logs backtracking
-		if reply.XLen != 0 {
-			rf.nextIndex[peerIdx] = reply.XLen
-		} else if reply.XTerm != 0 && reply.XIndex != 0 {
-			entry := findLastEntryHasSameTerm(reply.XTerm, rf)
-			if entry != nil {
-				rf.nextIndex[peerIdx] = entry.Index + 1
-			} else {
-				rf.nextIndex[peerIdx] = reply.XIndex
-			}
-		}
-	}
+	return args, reply, lastNextIdx
 }
 
 func (rf *Raft) getPeerPrevSentEntry(peerIdx int) (int, int) {
@@ -879,17 +851,7 @@ func (rf *Raft) recoverFromEncodedSnapshot(data []byte) {
 		DPrintf("[%d] baseIndex %d is greater than or equal to lastIncludedIndex %d, no need to recover", rf.me, rf.baseIndex, idx)
 		return
 	}
-	//me := rf.me
 	DPrintf("[%d] finished recovering from snapshot, lastIncludedIndex: %d, baseIndex: %d", rf.me, rf.lastIncludedIndex, rf.baseIndex)
-	// send the snapshot to the application layer
-	//applyMsg := raftapi.ApplyMsg{
-	//	Snapshot:      data,
-	//	SnapshotValid: true,
-	//	SnapshotIndex: rf.lastIncludedIndex,
-	//	SnapshotTerm:  rf.lastIncludedTerm,
-	//}
-	//rf.applyCh <- applyMsg
-	//DPrintf("[%d] after sending snapshot to application layer, lastIncludedIndex: %d, lastIncludedTerm: %d", rf.me, rf.lastIncludedIndex, rf.lastIncludedTerm)
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -923,9 +885,11 @@ func initRaft(peers []*labrpc.ClientEnd, me int, persister *tester.Persister, ap
 	rf.persister = persister
 	rf.me = me
 	rf.heartbeatInterval = 100 * time.Millisecond
+	rf.SetElectionTimeout(300 * time.Millisecond)
 	rf.logs = []*raftapi.LogEntry{}
+	// initial log entry
 	rf.logs = append(rf.logs, &raftapi.LogEntry{
-		Term:  0, // initial log entry
+		Term:  0,
 		Index: 0,
 	})
 	rf.state = StateFollower
