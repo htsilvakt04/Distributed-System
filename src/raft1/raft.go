@@ -326,14 +326,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if !checkLogsCond(args, reply, rf) {
 		return
 	}
+
 	appendNewEntriesToLogs(args, rf)
-	// Update the commit index since the leader's commit index may be higher than us
-	if args.LeaderCommit > rf.commitIndex {
-		lastCommitIndex := rf.commitIndex
-		rf.commitIndex = min(args.LeaderCommit, rf.getLastLogEntry().Index)
-		DPrintf("[%d] updated commitIndex to %d, given current commitIdx: %d, and LeaderCommit: %d from AppendEntries",
-			rf.me, rf.commitIndex, lastCommitIndex, args.LeaderCommit)
-	}
+	rf.updateCommitIndex(args.LeaderCommit)
 	reply.Success = true
 	return
 }
@@ -345,36 +340,16 @@ func (rf *Raft) InstallSnapshotRPC(args *InstallSnapshotRPCArgs, reply *InstallS
 	DPrintf("[%d] received InstallSnapshotRPC from %d, term: %d, LastIncludedIndex: %d, LastIncludedTerm: %d",
 		rf.me, args.LeaderId, args.Term, args.LastIncludedIndex, args.LastIncludedTerm)
 	reply.Term = rf.currentTerm
-	if args.Term < rf.currentTerm {
-		DPrintf("[%d] reject InstallSnapshotRPC from %d, due to stale term", rf.me, args.LeaderId)
-		return
-	}
-	if args.Term > rf.currentTerm && rf.state != StateFollower {
-		rf.convertToFollower(args.Term)
-	}
-	// update heartbeat time
-	rf.lastHeartbeat = time.Now()
-	if rf.baseIndex > args.LastIncludedIndex {
-		DPrintf("[%d] reject InstallSnapshotRPC from %d, baseIndex %d is greater than LastIncludedIndex %d", rf.me, args.LeaderId, rf.baseIndex, args.LastIncludedIndex)
+	if rf.handleStaleSnapshot(args) {
 		return
 	}
 	// save the snapshot
 	rf.persist(args.Data)
 	rf.lastIncludedTerm = args.LastIncludedTerm
 	rf.lastIncludedIndex = args.LastIncludedIndex
-
-	logs := make([]*raftapi.LogEntry, 0)
-	if args.LastIncludedIndex < rf.baseIndex+len(rf.logs) && args.LastIncludedTerm == rf.logs[args.LastIncludedIndex-rf.baseIndex].Term {
-		DPrintf("[%d] InstallSnapshotRPC: discarding logs up to index %d", rf.me, args.LastIncludedIndex)
-		// discard all log entries up to and including LastIncludedIndex
-		for i := args.LastIncludedIndex - rf.baseIndex + 1; i < len(rf.logs); i++ {
-			logs = append(logs, rf.logs[i])
-		}
-		rf.logs = logs
-		rf.baseIndex = args.LastIncludedIndex
+	if rf.discardLogs(args) {
 		return
 	}
-	rf.logs = logs
 	rf.baseIndex = args.LastIncludedIndex + 1
 	DPrintf("[%d] discarding all logs, set baseIndex to: %d, rf.logs to: %v", rf.me, rf.baseIndex, rf.logs)
 	// send snapshot to the application layer
@@ -399,14 +374,8 @@ func (rf *Raft) InstallSnapshotRPC(args *InstallSnapshotRPCArgs, reply *InstallS
 func (rf *Raft) sendInstallSnapshotRPC(peerIdx int) {
 	rf.mu.Lock()
 	DPrintf("[%d] send sendInstallSnapshotRPC() for peer %d, baseIndex: %d, nextIndex: %d", rf.me, peerIdx, rf.baseIndex, rf.nextIndex[peerIdx])
-	args := &InstallSnapshotRPCArgs{
-		Term:              rf.currentTerm,
-		LeaderId:          rf.me,
-		LastIncludedIndex: rf.lastIncludedIndex,
-		LastIncludedTerm:  rf.lastIncludedTerm,
-		Data:              rf.persister.ReadSnapshot(),
-	}
-	reply := &InstallSnapshotRPCReply{}
+	args, reply := rf.computeInstallSnapshotArgs()
+
 	rf.mu.Unlock()
 	ok := rf.peers[peerIdx].Call("Raft.InstallSnapshotRPC", args, reply)
 	rf.mu.Lock()
@@ -415,15 +384,8 @@ func (rf *Raft) sendInstallSnapshotRPC(peerIdx int) {
 		DPrintf("[%d] failed to send InstallSnapshotRPC to %d at term: %d, currentTerm: %d", rf.me, peerIdx, args.Term, rf.currentTerm)
 		return
 	}
-	DPrintf("[%d] InstallSnapshotRPC reply from %d at term: %d, currentTerm: %d", rf.me, peerIdx, reply.Term, rf.currentTerm)
-	if reply.Term > rf.currentTerm {
-		rf.convertToFollower(reply.Term)
-		rf.persist(nil)
-		return
-	}
-	// update the nextIndex and matchIndex for the peer
-	rf.nextIndex[peerIdx] = max(rf.lastIncludedIndex+1, rf.nextIndex[peerIdx])
-	rf.matchIndex[peerIdx] = max(rf.lastIncludedIndex, rf.matchIndex[peerIdx])
+
+	rf.handleInstallSnapshotReply(peerIdx, reply)
 }
 
 func (rf *Raft) getPersistedSnapshotData(data []byte) []byte {
@@ -572,9 +534,6 @@ func findLastEntryHasSameTerm(term int, rf *Raft) *raftapi.LogEntry {
 /*
 server: the server to send the RPC to
 */
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	return rf.peers[server].Call("Raft.RequestVote", args, reply)
-}
 
 func (rf *Raft) convertToFollower(otherTerm int) {
 	rf.SetCurrentTerm(otherTerm)
@@ -676,6 +635,177 @@ func (rf *Raft) initNextIndex() {
 func (rf *Raft) initMatchIndex() {
 	for i, _ := range rf.peers {
 		rf.matchIndex[i] = 0
+	}
+}
+
+func (rf *Raft) handleAppendEntriesReply(peerIdx int, lastNextIdx int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	DPrintf("[%d] received AppendEntries reply from %d, ok: %t, reply's term: %d, my current term: %d, entries I sent before: %v",
+		rf.me, peerIdx, reply.Success, reply.Term, rf.currentTerm, args.Entries)
+
+	if reply.Term > rf.currentTerm {
+		rf.convertToFollower(reply.Term)
+		rf.persist(nil)
+		return false
+	}
+	// Handle stale heartbeats
+	if lastNextIdx != rf.nextIndex[peerIdx] {
+		DPrintf("[%d] stale heartbeat reply from %d ignored (nextIndex %d != lastNextIdx %d)", rf.me, peerIdx, rf.nextIndex[peerIdx], lastNextIdx)
+		return false
+	}
+
+	if reply.Success {
+		if len(args.Entries) > 0 {
+			lastSentIdx := args.PrevLogIndex + len(args.Entries)
+			rf.matchIndex[peerIdx] = lastSentIdx
+			rf.nextIndex[peerIdx] = lastSentIdx + 1
+		}
+		DPrintf("[%d] AppendEntries to %d succeeded, updated nextIndex: %d, matchIndex: %d, current commitIdx: %d", rf.me, peerIdx, rf.nextIndex[peerIdx], rf.matchIndex[peerIdx], rf.commitIndex)
+	} else {
+		DPrintf("[%d] AppendEntries to %d failed, reply: %+v, current commit idx: %d", rf.me, peerIdx, reply, rf.commitIndex)
+		// handle logs backtracking
+		if reply.XLen != 0 {
+			rf.nextIndex[peerIdx] = reply.XLen
+		} else if reply.XTerm != 0 && reply.XIndex != 0 {
+			entry := findLastEntryHasSameTerm(reply.XTerm, rf)
+			if entry != nil {
+				rf.nextIndex[peerIdx] = entry.Index + 1
+			} else {
+				rf.nextIndex[peerIdx] = reply.XIndex
+			}
+		}
+	}
+	return true
+}
+
+func (rf *Raft) computeInstallSnapshotArgs() (*InstallSnapshotRPCArgs, *InstallSnapshotRPCReply) {
+	args := &InstallSnapshotRPCArgs{
+		Term:              rf.currentTerm,
+		LeaderId:          rf.me,
+		LastIncludedIndex: rf.lastIncludedIndex,
+		LastIncludedTerm:  rf.lastIncludedTerm,
+		Data:              rf.persister.ReadSnapshot(),
+	}
+	reply := &InstallSnapshotRPCReply{}
+	return args, reply
+}
+
+func (rf *Raft) handleInstallSnapshotReply(peerIdx int, reply *InstallSnapshotRPCReply) {
+	DPrintf("[%d] InstallSnapshotRPC reply from %d at term: %d, currentTerm: %d", rf.me, peerIdx, reply.Term, rf.currentTerm)
+	if reply.Term > rf.currentTerm {
+		rf.convertToFollower(reply.Term)
+		rf.persist(nil)
+		return
+	}
+	// update the nextIndex and matchIndex for the peer
+	rf.nextIndex[peerIdx] = max(rf.lastIncludedIndex+1, rf.nextIndex[peerIdx])
+	rf.matchIndex[peerIdx] = max(rf.lastIncludedIndex, rf.matchIndex[peerIdx])
+}
+
+func (rf *Raft) updateCommitIndex(commit int) {
+	if commit > rf.commitIndex {
+		lastCommitIndex := rf.commitIndex
+		rf.commitIndex = min(commit, rf.getLastLogEntry().Index)
+		DPrintf("[%d] updated commitIndex to %d, given current commitIdx: %d, and LeaderCommit: %d from AppendEntries",
+			rf.me, rf.commitIndex, lastCommitIndex, commit)
+	}
+}
+
+func (rf *Raft) computeRequestVoteArgs() (*RequestVoteArgs, *RequestVoteReply) {
+	lastLogEntry := rf.getLastLogEntry()
+	args := &RequestVoteArgs{
+		Term:         rf.currentTerm,
+		LastLogIndex: lastLogEntry.Index,
+		LastLogTerm:  lastLogEntry.Term,
+		CandidateId:  rf.me,
+	}
+	reply := &RequestVoteReply{}
+	return args, reply
+}
+
+func (rf *Raft) handleStaleSnapshot(args *InstallSnapshotRPCArgs) bool {
+	if args.Term < rf.currentTerm {
+		DPrintf("[%d] reject InstallSnapshotRPC from %d, due to stale term", rf.me, args.LeaderId)
+		return true
+	}
+	if args.Term > rf.currentTerm && rf.state != StateFollower {
+		rf.convertToFollower(args.Term)
+	}
+	// update heartbeat time
+	rf.lastHeartbeat = time.Now()
+	if rf.baseIndex > args.LastIncludedIndex {
+		DPrintf("[%d] reject InstallSnapshotRPC from %d, baseIndex %d is greater than LastIncludedIndex %d", rf.me, args.LeaderId, rf.baseIndex, args.LastIncludedIndex)
+		return true
+	}
+	return false
+}
+
+func (rf *Raft) discardLogs(args *InstallSnapshotRPCArgs) bool {
+	logs := make([]*raftapi.LogEntry, 0)
+	if args.LastIncludedIndex < rf.baseIndex+len(rf.logs) && args.LastIncludedTerm == rf.logs[args.LastIncludedIndex-rf.baseIndex].Term {
+		DPrintf("[%d] InstallSnapshotRPC: discarding logs up to index %d", rf.me, args.LastIncludedIndex)
+		// discard all log entries up to and including LastIncludedIndex
+		for i := args.LastIncludedIndex - rf.baseIndex + 1; i < len(rf.logs); i++ {
+			logs = append(logs, rf.logs[i])
+		}
+		rf.logs = logs
+		rf.baseIndex = args.LastIncludedIndex
+		return true
+	}
+	rf.logs = logs
+	return false
+}
+
+func (rf *Raft) handleSendRequestVote(peerIdx int, done *bool, lastTerm int, votes *int) {
+	rf.mu.Lock()
+	lastLogEntry := rf.getLastLogEntry()
+	args := &RequestVoteArgs{
+		Term:         rf.currentTerm,
+		LastLogIndex: lastLogEntry.Index,
+		LastLogTerm:  lastLogEntry.Term,
+		CandidateId:  rf.me,
+	}
+	reply := &RequestVoteReply{}
+	DPrintf("[%d] sendRequestVote to %d, currentTerm: %d ,args: %+v", rf.me, peerIdx, rf.currentTerm, args)
+	rf.mu.Unlock()
+	ok := rf.peers[peerIdx].Call("Raft.RequestVote", args, reply)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if !ok {
+		DPrintf("[%d] failed to send RequestVote to %d at term: %d, currentTerm: %d", rf.me, peerIdx, args.Term, rf.currentTerm)
+		return
+	}
+
+	DPrintf("[%d] sendRequestVote reply from %d, reply term: %d, current Term: %d, voteGranted: %t, reject reson: %s", rf.me, peerIdx, reply.Term, rf.currentTerm, reply.VoteGranted, reply.RejectReason)
+	if rf.killed() || *done || rf.currentTerm != lastTerm || rf.state == StateFollower {
+		DPrintf("[%d] election stopped, either killed or state changed to follower or already done", rf.me)
+		return
+	}
+
+	// convert to follow if cond meet
+	if reply.Term > rf.currentTerm {
+		rf.convertToFollower(reply.Term)
+		rf.persist(nil)
+		*done = true
+		return
+	}
+
+	if reply.VoteGranted {
+		*votes++
+	}
+
+	// tally the votes
+	if winElection := *votes > len(rf.peers)/2; winElection {
+		DPrintf("[%d] won election, votes: %d, currentTerm: %d, current CommitIdx: %d", rf.me, votes, rf.currentTerm, rf.commitIndex)
+		// print logs for debugging
+		DPrintf("[%d] logs after winning election", rf.me)
+		for i, entry := range rf.logs {
+			DPrintf("[%d] log[%d] = %+v", rf.me, i, *entry)
+		}
+		*done = true
+		rf.SetState(StateLeader)
+		rf.initNextIndex()
+		rf.initMatchIndex()
+		go rf.heartBeats()
 	}
 }
 

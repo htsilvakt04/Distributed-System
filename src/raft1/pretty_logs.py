@@ -41,7 +41,7 @@ for s in servers:
 
 colors = ["green", "yellow", "cyan", "magenta", "red"]
 for t in times:
-    short_time = str(t)[-8:]
+    short_time = str(t)[-6:]
     row = [short_time]
     for s in servers:
         msgs = by_time[t].get(s, [])

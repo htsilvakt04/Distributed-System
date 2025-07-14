@@ -27,24 +27,30 @@ type Raft struct {
 	state             State                 // current state of the peer (follower, candidate, leader)
 	lastHeartbeat     time.Time             // time of last heartbeat received from leader
 	heartbeatInterval time.Duration         // interval for sending heartbeats
-	/* persistent state on all servers:
-	- currentTerm
-	- votedFor
-	- logs[]
-	*/
-	logs              []*raftapi.LogEntry // log entries, indexed by log index
-	currentTerm       int
-	votedFor          int // candidateId that received vote in current term
-	lastIncludedIndex int
-	lastIncludedTerm  int // term of the last included log entry in the snapshot
-	baseIndex         int
+	electionTimeout   time.Duration         // timeout for starting a new election
 	// volatile state on all servers:
 	commitIndex int // index of highest log entry known to be committed
 	lastApplied int // index of highest log entry applied to state machine
 	// volatile state on leaders:
 	nextIndex  []int // for each server, index of the next log entry to send to that server
 	matchIndex []int // for each server, index of highest log entry known to be replicated on that server
+	/* persistent state on all servers */
+	logs              []*raftapi.LogEntry // log entries, indexed by log index
+	currentTerm       int
+	votedFor          int // candidateId that received vote in current term
+	lastIncludedIndex int
+	lastIncludedTerm  int // term of the last included log entry in the snapshot
+	baseIndex         int
 }
+
+func (rf *Raft) GetElectionTimeout() time.Duration {
+	return rf.electionTimeout
+}
+
+func (rf *Raft) SetElectionTimeout(electionTimeout time.Duration) {
+	rf.electionTimeout = electionTimeout
+}
+
 type EncodedRaftState struct {
 	CurrentTerm       int
 	VotedFor          int
