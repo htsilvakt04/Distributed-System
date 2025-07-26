@@ -3,8 +3,11 @@
 - [Lab01: Distributed MapReduce in Go](#lab01-distributed-mapreduce-in-go)
 - [Lab02: Key/Value Server and Distributed Lock](#lab02-keyvalue-server-and-distributed-lock)
 - [Lab03: Replicated State Machine with Raft](#lab03-replicated-state-machine-with-raft)
+- [Lab04: Fault-Tolerant Key/Value Storage with Raft](#lab04-fault-tolerant-keyvalue-storage-with-raft)
 
 ---
+# System Architecture Overview
+![System Architecture](images/system_architecture.png)
 
 # Lab01: Distributed MapReduce in Go
 
@@ -144,3 +147,62 @@ This lab was completed in four parts, each adding essential features:
 ## Testing
 
 ![Lab03 Result](images/Lab03.png)
+---
+# Lab04: Fault-Tolerant Key/Value Storage with Raft
+
+## Overview
+
+This project implements a fault-tolerant, distributed key/value store in Go using the Raft consensus protocol. 
+It builds upon the Raft library developed in Lab 3 and the client/server interface from Lab 2. The system ensures strong consistency and availability under network partitions and node failures, maintaining a linearizable history of operations.
+
+The system supports:
+
+* Replicated key/value storage with strong consistency
+* Transparent leader election and failure handling via Raft
+* Snapshotting to avoid unbounded Raft log growth
+* Transparent request retry and redirection in the presence of leader changes
+* Seamless recovery from crashes using persisted Raft state and service snapshots
+
+## Fault Tolerance
+
+* Client operations are retried until they reach the current Raft leader
+* Operations are committed via consensus before applying to the state machine
+* The system tolerates network partitions and server crashes as long as a majority of servers remain connected
+* Snapshots are taken when the Raft state exceeds a threshold, ensuring fast recovery
+* Servers restore their key/value state and Raft metadata from persistent storage
+
+## Development Notes
+Be prepared to fix bugs and handle edge cases, as with the complexity of the current layer will expose more issues than previous labs. \
+It costed me 2-3 days to get the code for the previous Raft Lab working reliably, with many iterations of debugging and testing.
+
+### Part A: Replicated State Machine (RSM)
+* Implemented the `rsm.Submit()` method that wraps operations, assigns unique IDs, and waits for Raft to commit them.
+* A background goroutine reads from `applyCh` and dispatches committed operations to the application-defined `StateMachine.DoOp()`.
+* Passed all 4A tests reliably:
+![Lab04A result](images/Lab04A.png)
+
+### Part B: Key/Value Service without Snapshots
+
+* Built a `kvserver` layer using the `rsm` abstraction to apply `Get` and `Put` operations.
+* Implemented a Clerk with retry and leader tracking logic to improve performance and fault tolerance.
+* Ensured all operations, including reads, are committed via Raft for consistency.
+* Avoided duplicate client requests by tracking client request IDs.
+* Successfully passed all 4B tests including network partitions, client restarts, and concurrent workloads:
+![Lab04B result](images/Lab04B.png)
+
+### Part C: Snapshot Integration
+
+* Integrated snapshot creation into `rsm` based on `maxraftstate`.
+* Snapshots include both Raft and key/value state, allowing fast recovery after crashes.
+* `kvserver` implements `Snapshot()` and `Restore()` for state serialization and recovery.
+* Passed snapshot tests including reboot scenarios:
+![Lab04C result](images/Lab04C.png)
+
+## File Layout
+* [`src/`](src/)
+    * [`kvraft1/`](src/kvraft1/)
+        * [`rsm/rsm.go`](src/kvraft1/rsm/rsm.go) – Replicated state machine using Raft
+        * [`server.go`](src/kvraft1/server.go) – Key/value server logic
+        * [`client.go`](src/kvraft1/client.go) – Clerk implementation for clients
+        * [`kvtest.go`](src/kvraft1/kvtest.go) – Test harness and test cases
+

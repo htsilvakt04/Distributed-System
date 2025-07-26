@@ -51,6 +51,46 @@ func (rf *Raft) SetElectionTimeout(electionTimeout time.Duration) {
 	rf.electionTimeout = electionTimeout
 }
 
+// for debugging purposes, prints the current logs of the Raft instance
+func (rf *Raft) printCurrentLogs() {
+	if !Debug {
+		return
+	}
+	logLen := len(rf.logs)
+	// Print first 2
+	for i := 0; i < logLen && i < 2; i++ {
+		DPrintf("[%d] log[%d] = %+v", rf.me, i, *rf.logs[i])
+	}
+	// Print last 2, skip overlap if log has fewer than 4 entries
+	start := logLen - 2
+	if start < 2 {
+		start = 2
+	}
+	for i := start; i < logLen; i++ {
+		DPrintf("[%d] log[%d] = %+v", rf.me, i, *rf.logs[i])
+	}
+}
+
+// for debugging purposes, prints the entries in the Raft instance
+func (rf *Raft) printEntries(entries []raftapi.LogEntry) {
+	if !Debug {
+		return
+	}
+	n := len(entries)
+	// First 2 entries
+	for i := 0; i < n && i < 2; i++ {
+		DPrintf("[%d] entry[%d] = %+v", rf.me, i, entries[i])
+	}
+	// Last 2 entries (without repeating printed ones)
+	start := n - 2
+	if start < 2 {
+		start = 2
+	}
+	for i := start; i < n; i++ {
+		DPrintf("[%d] entry[%d] = %+v", rf.me, i, entries[i])
+	}
+}
+
 type EncodedRaftState struct {
 	CurrentTerm       int
 	VotedFor          int
@@ -111,4 +151,9 @@ type InstallSnapshotRPCArgs struct {
 }
 type InstallSnapshotRPCReply struct {
 	Term int // current term of the follower
+}
+
+type Config struct {
+	HeartBeatInterval int `json:"heartBeatInterval"`
+	ElectionTimeout   int `json:"electionTimeout"`
 }

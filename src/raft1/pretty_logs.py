@@ -47,7 +47,7 @@ for t in times:
         msgs = by_time[t].get(s, [])
         color = colors[s % len(colors)]
         if msgs:
-            joined = " | ".join(msgs)
+            joined = " \n ".join(msgs)
             row.append(f"[{color}]{joined}[/]")
         else:
             row.append("")

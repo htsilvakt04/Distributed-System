@@ -10,7 +10,6 @@ import (
 	"6.5840/labrpc"
 	"6.5840/raftapi"
 	"6.5840/tester1"
-
 )
 
 const (
@@ -18,7 +17,6 @@ const (
 )
 
 var useRaftStateMachine bool // to plug in another raft besided raft1
-
 
 type rfsrv struct {
 	ts          *Test
@@ -152,11 +150,16 @@ func (rs *rfsrv) applierSnap(applyCh chan raftapi.ApplyMsg) {
 				}
 				e.Encode(xlog)
 				start := tester.GetAnnotateTimestamp()
-				rs.raft.Snapshot(m.CommandIndex, w.Bytes())
-				details := fmt.Sprintf(
-					"snapshot created after applying the command at index %v",
-					m.CommandIndex)
-				tester.AnnotateInfoInterval(start, "snapshot created", details)
+				idx := m.CommandIndex
+				bytesSend := w.Bytes()
+				raft2 := rs.raft
+				if raft2 != nil {
+					raft2.Snapshot(idx, bytesSend)
+					details := fmt.Sprintf(
+						"snapshot created after applying the command at index %v",
+						m.CommandIndex)
+					tester.AnnotateInfoInterval(start, "snapshot created", details)
+				}
 			}
 		} else {
 			// Ignore other types of ApplyMsg.

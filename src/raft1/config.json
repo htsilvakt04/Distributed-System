@@ -1,0 +1,4 @@
+{
+  "heartBeatInterval": 30,
+  "electionTimeout": 200
+}
