@@ -6,6 +6,18 @@
 - [Lab04: Fault-Tolerant Key/Value Storage with Raft](#lab04-fault-tolerant-keyvalue-storage-with-raft)
 
 ---
+# Summary of Labs
+As part of MIT 6.5840, I built a fault-tolerant, strongly consistent distributed key/value store in Go, structured into four key components:
+
+- **Clerk** – The client-side component that handles retries and transparently routes requests to the current Raft leader. It ensures user operations (e.g., Get/Put) are eventually delivered and processed even under failures or leadership changes.
+
+- **Application Layer (KV Server)** – This is the main entry point to the system, it exposes a key/value API to clients. It handles deduplication of client requests and manages state updates. This layer is agnostic of Raft and relies on the RSM to apply operations.
+
+- **Replicated State Machine (RSM)** – Acts as a middleware between the application and Raft. It forwards committed log entries to the application, manages snapshot creation when Raft log grows too large, and restores application state on restart or recovery.
+
+- **Raft Consensus Module** – Ensures fault-tolerant replication and ordering of client commands. It handles leader election, log replication, crash recovery, and snapshot installation, guaranteeing that a majority of servers agree on a consistent sequence of operations.
+
+Together, these components create a robust system that remains available and correct despite crashes, partitions, and unreliable networks. Every layer was tested under adversarial conditions to ensure correctness, recoverability, and linearizability.
 # System Architecture Overview
 ![System Architecture](images/system_architecture.png)
 
