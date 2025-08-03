@@ -22,6 +22,7 @@ type PutArgs struct {
 	Key     string
 	Value   string
 	Version Tversion
+	Id      int64 // unique ID for the operation
 }
 
 type PutReply struct {
@@ -30,10 +31,17 @@ type PutReply struct {
 
 type GetArgs struct {
 	Key string
+	Id  int64 // unique ID for the operation
 }
 
 type GetReply struct {
 	Value   string
 	Version Tversion
 	Err     Err
+}
+
+type GetStateArgs struct{}
+
+type GetStateReply struct {
+	IsLeader bool
 }

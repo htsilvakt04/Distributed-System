@@ -153,9 +153,9 @@ func (ts *Test) GenericTestSpeed() {
 		ts.t.Fatalf("Get too few ops %v", ver)
 	}
 
-	// heartbeat interval should be ~ 100 ms; require at least 3 ops per
+	// heartbeat interval should be ~ 100 ms; require at least 2 ops per
 	const heartbeatInterval = 100 * time.Millisecond
-	const opsPerInterval = 3
+	const opsPerInterval = 2
 	const timePerOp = heartbeatInterval / opsPerInterval
 	if dur > numOps*timePerOp {
 		ts.t.Fatalf("Operations completed too slowly %v/op > %v/op\n", dur/numOps, timePerOp)

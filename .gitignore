@@ -1,3 +1,5 @@
 pkg/
 *-handin.tar.gz
 .idea
+.DS_Store
+src/raft1/runlogs.log
